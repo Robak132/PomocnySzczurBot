@@ -31,7 +31,8 @@ def guild_of(interaction: discord.Interaction) -> discord.Guild:
 
 
 def mention_list(user_ids: list[int]) -> str:
-    return ", ".join(f"<@{uid}>" for uid in user_ids)
+    """One mention per line as a bullet list."""
+    return "\n".join(f"- <@{uid}>" for uid in user_ids)
 
 
 class ConfirmView(discord.ui.View):

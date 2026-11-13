@@ -45,4 +45,4 @@ class GroupCog(commands.GroupCog, group_name="group", group_description="Manage 
         if not players:
             await reply(interaction, "Your group has no players yet.")
             return
-        await reply(interaction, f"**Your group ({len(players)}):** {mention_list(players)}")
+        await reply(interaction, f"**Your group ({len(players)}):**\n{mention_list(players)}")

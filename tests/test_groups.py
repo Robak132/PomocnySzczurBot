@@ -20,27 +20,42 @@ async def env(tmp_path):
     await db.close()
 
 
-async def make_gm(env, id=10, name="Alice", **kwargs):
+async def make_gm(env, id=10, name="Alice", role_name=None):
+    """Register a GM and create a group role for them, like an admin would."""
     member = env.guild.add_member(id, name)
-    record = await env.svc.register_gm(env.guild, member, **kwargs)
-    return member, record, env.guild.get_role(record.role_id)
+    await env.svc.register_gm(env.guild, member)
+    role, _ = await env.svc.set_group_role(env.guild, id, name=role_name)
+    return member, await env.db.get_gm(id), role
 
 
 # ---- GM registration --------------------------------------------------------
-async def test_register_gm_creates_roles_and_gm_does_not_hold_group_role(env):
-    member, _, group_role = await make_gm(env)
+async def test_register_gm_gives_gm_role_but_no_group_role(env):
+    member = env.guild.add_member(10, "Alice")
+    record = await env.svc.register_gm(env.guild, member)
     gm_role = await env.svc.get_gm_role(env.guild)
     assert gm_role in member.roles
-    assert group_role is not None and group_role.name == "Alice"
+    assert record.role_id is None
+    assert len(env.guild.roles) == 2  # bot role + GM role: no group role created
+
+
+async def test_create_group_role_defaults_to_display_name_and_gm_does_not_hold_it(env):
+    member, record, group_role = await make_gm(env)
+    assert group_role.name == "Alice"
     assert group_role not in member.roles
-    assert (await env.db.get_gm(10)).role_id == group_role.id
+    assert record.role_id == group_role.id
 
 
-async def test_register_gm_custom_name(env):
-    member = env.guild.add_member(11, "Bob")
-    record = await env.svc.register_gm(env.guild, member, name="Dragons")
-    role = env.guild.get_role(record.role_id)
+async def test_create_group_role_with_custom_name(env):
+    _, _, role = await make_gm(env, id=11, name="Bob", role_name="Dragons")
     assert role.name == "Dragons"
+
+
+async def test_gm_without_group_role_cannot_add_players(env):
+    member = env.guild.add_member(10, "Alice")
+    await env.svc.register_gm(env.guild, member)
+    pat = env.guild.add_member(20, "Pat")
+    with pytest.raises(ServiceError, match="no group role yet"):
+        await env.svc.add_player(env.guild, 10, pat)
 
 
 async def test_register_gm_twice_fails(env):
@@ -64,11 +79,12 @@ async def test_default_names_do_not_collide(env):
 async def test_explicit_duplicate_name_rejected(env):
     await make_gm(env, id=10, name="Alice")
     member = env.guild.add_member(11, "Bob")
+    await env.svc.register_gm(env.guild, member)
     with pytest.raises(ServiceError, match="already exists"):
-        await env.svc.register_gm(env.guild, member, name="alice")
+        await env.svc.set_group_role(env.guild, 11, name="alice")
 
 
-async def test_unregister_deletes_group_role_by_default(env):
+async def test_unregister_deletes_bot_created_group_role_by_default(env):
     member, _, role = await make_gm(env)
     env.guild.add_member(20, "Pat")
     await env.svc.add_player(env.guild, 10, env.guild.get_member(20))
@@ -115,7 +131,7 @@ async def test_set_gm_role_rejects_role_above_bot(env):
 async def test_deleted_gm_role_gives_clear_error(env):
     await make_gm(env)
     (await env.svc.get_gm_role(env.guild)).guild.roles.pop((await env.svc.get_gm_role(env.guild)).id)
-    with pytest.raises(ServiceError, match="gm-role"):
+    with pytest.raises(ServiceError, match="set-role"):
         await env.svc.get_gm_role(env.guild)
 
 
@@ -127,16 +143,13 @@ async def test_role_assigned_by_hand_registers_gm_and_removal_orphans(env):
     await bob.add_roles(gm_role)
     await env.svc.handle_member_update(before, bob)
     record = await env.db.get_gm(40)
-    assert record is not None
-    group_role = env.guild.get_role(record.role_id)
-    assert group_role not in bob.roles
+    assert record is not None and record.role_id is None  # no group role is created automatically
 
     before = SimpleNamespace(roles=list(bob.roles))
     await bob.remove_roles(gm_role)
     await env.svc.handle_member_update(before, bob)
     assert await env.db.get_gm(40) is None
     assert (await env.db.get_gm(40, include_inactive=True)).active is False
-    assert env.guild.get_role(record.role_id) is not None
 
 
 async def test_member_update_is_idempotent_for_bot_driven_changes(env):
@@ -248,13 +261,11 @@ async def test_deleted_group_role_flagged_then_sync_recreates_it(env):
 
     await role.delete()
     await env.svc.handle_role_deleted(role)
-    assert (await env.db.get_gm(10)).needs_repair
 
     report = await env.svc.sync(env.guild)
     assert any("Recreated" in line for line in report)
     new_role = env.guild.get_role((await env.db.get_gm(10)).role_id)
     assert new_role is not None and new_role in pat.roles
-    assert not (await env.db.get_gm(10)).needs_repair
 
 
 async def test_sync_follows_discord_for_role_holders(env):
@@ -302,20 +313,28 @@ async def test_audit_log_and_hook(env, tmp_path):
     assert any(call[1] == "gm_added" for call in calls)
 
 
-# ---- adopting an existing role as the group role -----------------------------
-async def test_register_gm_adopts_existing_role_and_imports_holders(env):
+# ---- setting an existing role as the group role ------------------------------
+async def register(env, id=10, name="Alice"):
+    member = env.guild.add_member(id, name)
+    await env.svc.register_gm(env.guild, member)
+    return member
+
+
+async def test_set_existing_role_imports_holders(env):
     import discord
 
     campaign = env.guild.add_role("Dragons", permissions=discord.Permissions(send_messages=True))
-    gm = env.guild.add_member(10, "Alice")
+    gm = await register(env)
     p1 = env.guild.add_member(20, "Bob")
     p2 = env.guild.add_member(21, "Cid")
     bot = env.guild.add_member(50, "SomeBot", bot=True)
     for m in (gm, p1, p2, bot):
         m.roles.append(campaign)
 
-    record = await env.svc.register_gm(env.guild, gm, role=campaign)
+    role, imported = await env.svc.set_group_role(env.guild, 10, role=campaign)
 
+    assert role is campaign and imported == 2
+    record = await env.db.get_gm(10)
     assert record.role_id == campaign.id
     assert len(env.guild.roles) == 3  # bot role, GM role, Dragons: nothing new created
     assert campaign not in gm.roles  # GM does not hold their own group role
@@ -323,79 +342,109 @@ async def test_register_gm_adopts_existing_role_and_imports_holders(env):
     assert campaign.name == "Dragons"
 
 
-async def test_adopted_role_is_never_renamed(env):
+async def test_role_and_name_together_are_refused(env):
     campaign = env.guild.add_role("old")
-    gm = env.guild.add_member(10, "Alice")
-    with pytest.raises(ServiceError, match="doesn't rename roles"):
-        await env.svc.register_gm(env.guild, gm, role=campaign, name="Dragons")
+    await register(env)
+    with pytest.raises(ServiceError, match="not both"):
+        await env.svc.set_group_role(env.guild, 10, role=campaign, name="Dragons")
     assert campaign.name == "old"
-    assert await env.db.get_gm(10) is None
+    assert (await env.db.get_gm(10)).role_id is None
 
 
-async def test_reregistered_gm_role_is_never_renamed(env):
-    alice, _, role = await make_gm(env)
-    await env.svc.unregister_gm(env.guild, 10, keep_role=True)
-    with pytest.raises(ServiceError, match="doesn't rename roles"):
-        await env.svc.register_gm(env.guild, alice, name="New")
-    assert role.name == "Alice"
+async def test_setting_the_same_role_again_is_refused(env):
+    _, _, role = await make_gm(env)
+    with pytest.raises(ServiceError, match="already this GM's group role"):
+        await env.svc.set_group_role(env.guild, 10, role=role)
 
 
-async def test_adopted_role_works_like_a_normal_group(env):
+async def test_switching_role_moves_players_and_keeps_old_role(env):
+    _, _, old = await make_gm(env)
+    pat = env.guild.add_member(20, "Pat")
+    await env.svc.add_player(env.guild, 10, pat)
+    outsider = env.guild.add_member(21, "Outsider")
+    await outsider.add_roles(old)  # holds the old role without being in the group
     campaign = env.guild.add_role("Dragons")
-    gm = env.guild.add_member(10, "Alice")
-    await env.svc.register_gm(env.guild, gm, role=campaign)
+
+    await env.svc.set_group_role(env.guild, 10, role=campaign)
+
+    assert env.guild.get_role(old.id) is not None  # never deleted on change
+    assert old not in pat.roles and campaign in pat.roles
+    assert old in outsider.roles  # only the group's players lose it
+    assert await env.db.list_members(10) == [20]
+
+
+async def test_switching_to_a_new_role_keeps_old_role(env):
+    campaign = env.guild.add_role("Dragons")
+    await register(env)
+    await env.svc.set_group_role(env.guild, 10, role=campaign)
+    pat = env.guild.add_member(20, "Pat")
+    await env.svc.add_player(env.guild, 10, pat)
+
+    new_role, _ = await env.svc.set_group_role(env.guild, 10)
+
+    assert env.guild.get_role(campaign.id) is not None
+    assert campaign not in pat.roles and new_role in pat.roles
+
+
+async def test_existing_role_works_like_a_normal_group(env):
+    campaign = env.guild.add_role("Dragons")
+    await register(env)
+    await env.svc.set_group_role(env.guild, 10, role=campaign)
     newbie = env.guild.add_member(30, "Dee")
     await env.svc.add_player(env.guild, 10, newbie)
     assert campaign in newbie.roles
     assert 30 in await env.db.list_members(10)
 
 
-async def test_cannot_adopt_another_gms_group_role(env):
+async def test_cannot_use_another_gms_group_role(env):
     _, _, alice_role = await make_gm(env)
-    bob = env.guild.add_member(11, "Bob")
+    await register(env, 11, "Bob")
     with pytest.raises(ServiceError, match="already the group role"):
-        await env.svc.register_gm(env.guild, bob, role=alice_role)
-    assert await env.db.get_gm(11) is None
+        await env.svc.set_group_role(env.guild, 11, role=alice_role)
+    assert (await env.db.get_gm(11)).role_id is None
 
 
-async def test_cannot_adopt_gm_role_everyone_or_managed(env):
-    await make_gm(env)
+async def test_cannot_use_gm_role_everyone_or_managed(env):
+    await register(env, 11, "Bob")
     gm_role = await env.svc.get_gm_role(env.guild)
-    bob = env.guild.add_member(11, "Bob")
     with pytest.raises(ServiceError, match="GM role"):
-        await env.svc.register_gm(env.guild, bob, role=gm_role)
+        await env.svc.set_group_role(env.guild, 11, role=gm_role)
     everyone = env.guild.add_role("@everyone")
     everyone.id = env.guild.id
     with pytest.raises(ServiceError, match="@everyone"):
-        await env.svc.register_gm(env.guild, bob, role=everyone)
+        await env.svc.set_group_role(env.guild, 11, role=everyone)
     managed = env.guild.add_role("Integration", managed=True)
     with pytest.raises(ServiceError, match="managed"):
-        await env.svc.register_gm(env.guild, bob, role=managed)
+        await env.svc.set_group_role(env.guild, 11, role=managed)
 
 
-
-async def test_cannot_adopt_role_above_the_bot(env):
+async def test_cannot_use_role_above_the_bot(env):
     high = env.guild.add_role("High", position=500)
-    bob = env.guild.add_member(11, "Bob")
+    await register(env, 11, "Bob")
     with pytest.raises(ServiceError, match="above my highest role"):
-        await env.svc.register_gm(env.guild, bob, role=high)
-    assert await env.db.get_gm(11) is None
+        await env.svc.set_group_role(env.guild, 11, role=high)
+    assert (await env.db.get_gm(11)).role_id is None
 
 
-async def test_cannot_adopt_role_with_elevated_permissions(env):
+async def test_cannot_use_role_with_elevated_permissions(env):
     import discord
 
     mods = env.guild.add_role("Mods", permissions=discord.Permissions(kick_members=True))
-    bob = env.guild.add_member(11, "Bob")
+    await register(env, 11, "Bob")
     with pytest.raises(ServiceError, match="elevated permissions"):
-        await env.svc.register_gm(env.guild, bob, role=mods)
-    assert await env.db.get_gm(11) is None
+        await env.svc.set_group_role(env.guild, 11, role=mods)
+    assert (await env.db.get_gm(11)).role_id is None
 
 
-async def test_adopted_role_may_have_ordinary_permissions(env):
+async def test_existing_role_may_have_ordinary_permissions(env):
     import discord
 
     chat = env.guild.add_role("Chat", permissions=discord.Permissions(send_messages=True, attach_files=True))
-    bob = env.guild.add_member(11, "Bob")
-    record = await env.svc.register_gm(env.guild, bob, role=chat)
-    assert record.role_id == chat.id
+    await register(env, 11, "Bob")
+    role, _ = await env.svc.set_group_role(env.guild, 11, role=chat)
+    assert role is chat
+
+
+async def test_sync_leaves_gms_without_group_role_alone(env):
+    await register(env)
+    assert await env.svc.sync(env.guild) == []

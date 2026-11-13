@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 import discord
 from discord import app_commands
@@ -42,14 +43,45 @@ class PermissionBot(commands.Bot):
         await self.tree.sync(guild=guild)
 
     async def on_ready(self) -> None:
-        role_id = self.config.access_role_id
-        if role_id is None:
-            return
         guild = self.get_guild(self.config.guild_id)
-        if guild is not None and guild.get_role(role_id) is None:
-            log.warning("ACCESS_ROLE_ID %s does not exist on the server, so nobody can use the bot", role_id)
-        else:
-            log.info("Bot access limited to members with role %s", role_id)
+        if guild is None:
+            log.error("The bot is not in the server with ID %s. Invite it first.", self.config.guild_id)
+            return
+        gm_role = None
+        try:
+            gm_role = await self.service.get_gm_role(guild, create=True)
+        except (ServiceError, discord.HTTPException) as exc:
+            log.warning("Could not prepare the GM role: %s", exc)
+        log.info("Configuration:\n%s", self._describe_config(guild, gm_role))
+        for problem in await self.service.check_hierarchy(guild):
+            log.warning(problem)
+        log.info("Ready as %s", self.user)
+
+    def _describe_config(self, guild: discord.Guild, gm_role: discord.Role | None) -> str:
+        """The configuration as names a human can check, never the token."""
+        config = self.config
+
+        def role(role_id: int | None, unset: str) -> str:
+            if role_id is None:
+                return unset
+            found = guild.get_role(role_id)
+            return f"@{found.name}" if found else f"⚠ no role with ID {role_id} on this server"
+
+        channel_text = "not set"
+        if config.log_channel_id is not None:
+            channel = guild.get_channel(config.log_channel_id)
+            channel_text = f"#{channel.name}" if channel else f"⚠ no channel with ID {config.log_channel_id} on this server"
+
+        rows = [
+            ("Bot", str(self.user)),
+            ("Server", guild.name),
+            ("GM role", f"@{gm_role.name}" if gm_role else "⚠ missing"),
+            ("Admin role", role(config.admin_role_id, "not set (only members with the Administrator permission)")),
+            ("Access role", role(config.access_role_id, "not set (everyone can use the bot)")),
+            ("Log channel", channel_text),
+            ("Database", str(Path(config.db_path).resolve())),
+        ]
+        return "\n".join(f"  {label + ':':<13} {value}" for label, value in rows)
 
     async def close(self) -> None:
         await super().close()

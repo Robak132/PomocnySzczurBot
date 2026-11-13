@@ -13,15 +13,15 @@ A Discord bot that manages membership and role cosmetics for a tabletop-style se
 |---|---|
 | Admin | Member with the Discord "Administrator" permission, or holding the configured admin role |
 | GM role | The shared Discord role (default name "GM") that marks Game Masters. Assigned and removed by admins |
-| GM | Member holding the GM role. Owns exactly one group and one group role |
+| GM | Member holding the GM role. Owns one group and at most one group role |
 | Group | A GM's team: the set of players the GM has added |
 | Rank | The group's Discord role. Held by the group's players, **not** by the GM. The bot names it when creating it and never renames or recolors it afterwards |
 | Player | Any member added to a GM's group |
 
 ### Assumptions (change if wrong)
 - A player may belong to **several groups at once** (one membership row per GM).
-- Being a GM means holding the **GM role**. Admins assign it with `/admin gm add` (or by hand in Discord; the bot notices and registers the GM). Admins can point the bot at an existing role with `/admin gm-role set`, otherwise the bot creates a role named "GM" on first use (no extra permissions).
-- Every GM has exactly one group role, created when the GM is registered.
+- Being a GM means holding the **GM role**. Admins assign it with `/admin gm add` (or by hand in Discord; the bot notices and registers the GM). Admins can point the bot at an existing role with `/admin set-role role:@role`, otherwise the bot creates a role named "GM" on first use (no extra permissions).
+- A GM is registered without a group role. An admin gives them one with `/admin gm set-group-role`, either an existing role or a new one. Until then the GM can't add players.
 - The GM does **not** hold their own group role. The role is assigned to players only.
 - The bot only manages roles it created or that an admin designated as the GM role. It never touches other roles.
 
@@ -29,7 +29,9 @@ A Discord bot that manages membership and role cosmetics for a tabletop-style se
 ```
 gms(
   user_id      INTEGER PRIMARY KEY,
-  role_id      INTEGER UNIQUE NOT NULL,
+  role_id      INTEGER UNIQUE,              -- NULL until the GM gets a group role
+  active       INTEGER NOT NULL DEFAULT 1,  -- 0 = orphaned group
+  needs_repair INTEGER NOT NULL DEFAULT 0,  -- unused
   created_at   TEXT NOT NULL
 )
 settings(
@@ -48,7 +50,7 @@ audit_log(
   detail TEXT, created_at TEXT
 )
 ```
-The schema version is stored in SQLite's `PRAGMA user_version` (currently 1). A new, empty file gets the schema and the current version. A file with any other version is never upgraded: the bot logs the mismatch and exits, and the admin backs up and removes the file or runs the matching bot version.
+The schema version is stored in SQLite's `PRAGMA user_version` (currently 3). A new, empty file gets the schema and the current version. A file with any other version is never upgraded: the bot logs the mismatch and exits, and the admin backs up and removes the file or runs the matching bot version.
 
 Discord is the source of truth for role membership. The DB records ownership and group structure. A `/admin sync` command reconciles differences.
 
@@ -64,34 +66,34 @@ Discord is the source of truth for role membership. The DB records ownership and
 ### 5.2 Admin commands (caller must be admin)
 | Command | Behavior |
 |---|---|
-| `/admin gm add user:@member [name] [role:@role]` | Assigns the GM role, registers the user, and creates their group role, named `name` (1-100 chars, unique among bot-managed roles) or the user's display name. With `role`, that existing role becomes the group role instead (see 5.3). The GM does not receive the group role |
+| `/admin gm add user:@member` | Assigns the GM role and registers the user. No group role is created. A previously orphaned GM gets their old group role and players back |
+| `/admin gm set-group-role user:@member [role:@role] [name]` | Sets the GM's group role: with `role`, that existing role (see 5.3); without it, a newly created role named `name` (1-100 chars, unique among bot-managed roles) or the GM's display name. Recorded players are given the new role. The previous group role is never deleted; it is only taken from the group's players. The GM does not receive the group role |
 | `/admin gm remove user:@member [keep_role]` | Revokes the GM role, unregisters the GM, and **deletes the group role by default** (`keep_role:true` keeps it). Requires confirmation button |
-| `/admin gm list` | Lists all GMs with group name and player count |
-| `/admin gm-role set role:@role` | Designates an existing Discord role as the GM role. Existing holders are registered as GMs |
-| `/admin gm-role create [name]` | Creates a new GM role (default name "GM") and designates it |
+| `/admin list` | Lists all GMs with group name and player count |
+| `/admin set-role [role:@role] [name]` | With `role`: designates that existing role as the GM role and registers its holders as GMs, without group roles. Without it: creates a new GM role named `name` (default "GM") and designates it. `role` and `name` together are refused |
 | `/admin player add gm:@gm user:@member` | Adds a player to that GM's group |
 | `/admin player remove gm:@gm user:@member` | Removes a player from that GM's group |
-| `/admin player list gm:@gm` | Lists players of that GM's group |
+| `/admin gm list gm:@gm` | Lists players of that GM's group |
 | `/admin sync` | Reconciles DB with actual Discord role membership and reports drift |
 
 Autocomplete for the `gm` argument lists registered GMs. The argument is a text field filled from the suggestions, because Discord can't autocomplete user pickers.
 
-### 5.3 Adopting an existing role
-`/admin gm add ... role:@role` turns a role that already exists on the server into the GM's group role.
+### 5.3 Using an existing role
+`/admin gm set-group-role ... role:@role` turns a role that already exists on the server into the GM's group role.
 - Everyone already holding the role (except bots and the GM) is recorded as a player. The GM loses the role.
-- The adopted role keeps its name and color. `name` is refused together with `role`, because the bot never renames existing roles. The same applies when re-registering a GM whose old group role still exists.
+- The role keeps its name and color. `name` is refused together with `role`, because the bot never renames existing roles.
 - Refused for roles with elevated permissions (Administrator, Manage Server/Roles/Channels/Messages/Threads/Nicknames/Webhooks/Expressions/Events, Kick, Ban, Timeout, Mention Everyone, View Audit Log), because the GM could hand those to players. Ordinary permissions such as Send Messages are fine.
 - Also refused where it can't work: @everyone and integration-managed roles (Discord won't assign them), roles above the bot, the GM role, and another GM's group role (active or orphaned).
-- After adoption it behaves like any group role. `/admin gm remove` deletes it unless `keep_role` is set.
+- Afterwards it behaves like any group role. `/admin gm remove` deletes it unless `keep_role` is set.
 
 ## 6. Rules and validation
 1. Permission checks run before any action. Failures return an ephemeral error, never a partial change.
 2. A user cannot be added to a group they are already in, but may be in other groups. Cannot add a bot account. A GM cannot add an admin or another GM as a player.
-3. Removing a GM via `/admin gm remove` deletes their group role (unless `keep_role:true`) and their `group_members` rows. If the role is kept, rows are kept and the group is marked orphaned.
-3a. If someone gains the GM role in Discord outside the bot, `on_member_update` registers them as a GM and creates their group role (default name: display name). If they lose it, they are unregistered like `/admin gm remove`, but their group role is kept (orphaned) and an audit entry is written, so an accidental removal loses nothing.
+3. Removing a GM via `/admin gm remove` deletes their group role (unless `keep_role:true`) and deletes their `group_members` rows. If the role is kept, rows are kept and the group is marked orphaned.
+3a. If someone gains the GM role in Discord outside the bot, `on_member_update` registers them as a GM (without a group role). If they lose it, they are unregistered like `/admin gm remove`, but their group role is kept (orphaned) and an audit entry is written, so an accidental removal loses nothing.
 4. If a member leaves the server, they are removed from `group_members` (`on_member_remove`).
 4a. If a GM leaves the server, they are unregistered and their group is kept orphaned (role and players stay) until an admin cleans it up or re-adds them.
-5. If a group role is deleted manually in Discord, the bot detects it (`on_guild_role_delete`), logs it, and marks the group as needing repair. `/admin sync` recreates the role and re-grants it to the group's players. If the GM role itself is deleted, `/admin gm-role create` or `set` must be run again; GM commands are disabled until then.
+5. If a group role is deleted manually in Discord, the bot detects it (`on_guild_role_delete`), and logs it. The group is recognisable as broken because its `role_id` points to a role that no longer exists. `/admin sync` recreates the role and re-grants it to the group's players. If the GM role itself is deleted, `/admin set-role` must be run again; GM commands are disabled until then.
 6. The bot never renames or recolors existing roles. New group roles get the given name (or the GM's display name) and Discord's default color.
 7. All responses are ephemeral except confirmations an admin chooses to make public.
 
@@ -143,6 +145,6 @@ Channel-level permission overwrites, multiple roles per GM, web dashboard, sched
 
 ## 13. Decisions
 1. Players may be in several groups: yes.
-2. GMs hold a shared "GM" role, assignable by admins: yes. Each GM has a group role, but the GM does not hold it.
+2. GMs hold a shared "GM" role, assignable by admins: yes. Each GM can have a group role, set or created by an admin; the GM does not hold it.
 3. Group roles are hoisted (shown separately in the member list): no.
-4. Removing a GM deletes their group role by default: yes.
+4. Removing a GM deletes their group role by default: yes. Changing a GM's group role never deletes the old one.

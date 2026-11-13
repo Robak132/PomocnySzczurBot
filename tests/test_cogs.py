@@ -11,13 +11,13 @@ EXPECTED = {
     "group remove",
     "group list",
     "admin gm add",
+    "admin gm set-group-role",
     "admin gm remove",
-    "admin gm list",
-    "admin gm-role set",
-    "admin gm-role create",
+    "admin list",
+    "admin set-role",
     "admin player add",
     "admin player remove",
-    "admin player list",
+    "admin gm list",
     "admin sync",
 }
 
@@ -46,6 +46,6 @@ async def test_command_tree_matches_spec(tmp_path):
     assert bot.tree.get_command("group").get_command("add").binding is group_cog
 
     # The `gm` argument of /admin player * has autocomplete.
-    for name in ("add", "remove", "list"):
-        command = admin.get_command("player").get_command(name)
+    for group, name in (("player", "add"), ("player", "remove"), ("gm", "list")):
+        command = admin.get_command(group).get_command(name)
         assert command._params["gm"].autocomplete is not None

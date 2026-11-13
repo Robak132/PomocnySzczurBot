@@ -3,7 +3,7 @@
 Manages GMs and their groups of players on one Discord server. Full design: [docs/spec.md](docs/spec.md).
 
 - **Admins** assign the shared **GM** role and manage every group.
-- Each **GM** gets one **group role** (their "rank"). Players hold it; the GM does not.
+- Each **GM** can have one **group role** (their "rank"). Players hold it; the GM does not. A new GM has none until an admin sets or creates one.
 - **GMs** add, remove and list their own players.
 - A player can be in several groups. Admins and GMs can't be added as players.
 
@@ -23,7 +23,7 @@ Manages GMs and their groups of players on one Discord server. Full design: [doc
    python -m bot
    ```
 
-On first start the bot creates a role named **GM** (or use `/admin gm-role set` to pick an existing role).
+On first start the bot creates a role named **GM** (or use `/admin set-role role:@Role` to pick an existing role).
 
 ## Commands
 
@@ -39,16 +39,18 @@ On first start the bot creates a role named **GM** (or use `/admin gm-role set` 
 
 | Command | What it does |
 |---|---|
-| `/admin gm add user [name] [role]` | Give the GM role and create their group role (`name` sets the new role's name). With `role`, an existing role becomes the group role and its current holders become players |
+| `/admin gm add user` | Give the GM role. No group role is created |
+| `/admin gm set-group-role user [role] [name]` | With `role`: use that existing role as the GM's group role, and its current holders become players. Without it: create a new role (named `name`, or the GM's display name). Players move to the new role; the old role stays on the server and is only taken from the players |
 | `/admin gm remove user [keep_role]` | Remove a GM. Deletes their group role unless `keep_role` is set |
-| `/admin gm list` | List GMs, group role names and player counts |
-| `/admin gm-role set role` / `create [name]` | Choose or create the GM role |
-| `/admin player add\|remove\|list gm [user]` | Manage the players of any GM (pick the GM from autocomplete) |
+| `/admin list` | List GMs, group role names and player counts |
+| `/admin set-role [role] [name]` | With `role`: use that existing role as the GM role and register its holders as GMs. Without it: create a new GM role (named `name`, default GM) |
+| `/admin player add\|remove gm user` | Add or remove a player in any GM's group (pick the GM from autocomplete) |
+| `/admin gm list gm` | List the players of a GM's group |
 | `/admin sync` | Reconcile the bot's records with Discord |
 
 ## Behavior worth knowing
 
-- Giving someone the GM role by hand in Discord registers them as a GM too (and creates their group role).
+- Giving someone the GM role by hand in Discord (or `/admin set-role role:@Role`) registers them as a GM, without a group role.
   Taking it away unregisters them but keeps the group role and players, so a slip loses nothing.
 - If a member leaves the server they are dropped from every group. If a GM leaves, their group is kept orphaned.
 - If a group role is deleted, the bot flags it. `/admin sync` recreates it and gives it back to the group's players.

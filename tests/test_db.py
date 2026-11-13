@@ -35,7 +35,7 @@ async def test_schema_has_no_cascade(tmp_path):
 async def test_deleting_gm_row_with_players_is_refused(tmp_path):
     db = Database(str(tmp_path / "x.db"))
     await db.connect()
-    await db.insert_gm(10, 100)
+    await db.insert_gm(10)
     await db.add_member(10, 20)
     with pytest.raises(sqlite3.IntegrityError):
         await db._write("DELETE FROM gms WHERE user_id = 10")
@@ -47,7 +47,7 @@ async def test_deleting_gm_row_with_players_is_refused(tmp_path):
 async def test_delete_gm_removes_players_explicitly(tmp_path):
     db = Database(str(tmp_path / "x.db"))
     await db.connect()
-    await db.insert_gm(10, 100)
+    await db.insert_gm(10)
     await db.add_member(10, 20)
     await db.delete_gm(10)
     assert await db.get_gm(10, include_inactive=True) is None
@@ -103,7 +103,7 @@ async def test_settings_insert_then_update(tmp_path):
 async def test_duplicate_member_insert_is_an_error(tmp_path):
     db = Database(str(tmp_path / "x.db"))
     await db.connect()
-    await db.insert_gm(10, 100)
+    await db.insert_gm(10)
     await db.add_member(10, 20)
     assert await db.is_member(10, 20)
     with pytest.raises(sqlite3.IntegrityError):
@@ -111,12 +111,23 @@ async def test_duplicate_member_insert_is_an_error(tmp_path):
     await db.close()
 
 
-async def test_reactivate_gm_switches_role(tmp_path):
+async def test_gm_starts_without_role_and_keeps_it_through_reactivation(tmp_path):
     db = Database(str(tmp_path / "x.db"))
     await db.connect()
-    await db.insert_gm(10, 100)
+    await db.insert_gm(10)
+    assert (await db.get_gm(10)).role_id is None
+    await db.set_group_role(10, 200)
     await db.deactivate_gm(10)
-    await db.reactivate_gm(10, 200)
+    await db.reactivate_gm(10)
     gm = await db.get_gm(10)
     assert gm.active and gm.role_id == 200
+    await db.close()
+
+
+async def test_several_gms_without_role_are_allowed(tmp_path):
+    db = Database(str(tmp_path / "x.db"))
+    await db.connect()
+    await db.insert_gm(10)
+    await db.insert_gm(11)  # NULL role_id doesn't clash with the UNIQUE constraint
+    assert len(await db.list_gms()) == 2
     await db.close()

@@ -19,20 +19,6 @@ class EventsCog(commands.Cog):
         self.guild_id = guild_id
 
     @commands.Cog.listener()
-    async def on_ready(self) -> None:
-        guild = self.bot.get_guild(self.guild_id)
-        if guild is None:
-            log.error("The bot is not in the server with ID %s. Invite it first.", self.guild_id)
-            return
-        try:
-            await self.service.get_gm_role(guild, create=True)
-        except (ServiceError, discord.HTTPException) as exc:
-            log.warning("Could not prepare the GM role: %s", exc)
-        for problem in await self.service.check_hierarchy(guild):
-            log.warning(problem)
-        log.info("Ready as %s", self.bot.user)
-
-    @commands.Cog.listener()
     async def on_member_remove(self, member: discord.Member) -> None:
         if member.guild.id == self.guild_id:
             await self.service.handle_member_remove(member)

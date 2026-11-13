@@ -10,14 +10,14 @@ from .exceptions import DatabaseVersionError
 
 # Bump this whenever SCHEMA changes. The bot refuses to start on a database
 # with a different version instead of trying to upgrade it.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS gms (
     user_id      INTEGER PRIMARY KEY,
-    role_id      INTEGER UNIQUE NOT NULL,
+    role_id      INTEGER UNIQUE,              -- NULL until an admin gives the GM a group role
     active       INTEGER NOT NULL DEFAULT 1,
-    needs_repair INTEGER NOT NULL DEFAULT 0,
+    needs_repair INTEGER NOT NULL DEFAULT 0,  -- unused; kept so the schema version stays the same
     created_at   TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS group_members (
@@ -50,13 +50,12 @@ def _now() -> str:
 @dataclass(frozen=True)
 class GmRecord:
     user_id: int
-    role_id: int
+    role_id: int | None  # None: the GM has no group role yet
     active: bool
-    needs_repair: bool
 
 
 def _gm(row: aiosqlite.Row) -> GmRecord:
-    return GmRecord(row["user_id"], row["role_id"], bool(row["active"]), bool(row["needs_repair"]))
+    return GmRecord(row["user_id"], row["role_id"], bool(row["active"]))
 
 
 def _gm_or_none(row: aiosqlite.Row | None) -> GmRecord | None:
@@ -152,18 +151,16 @@ class Database:
         rows = await self._all("SELECT * FROM gms WHERE active = 1 ORDER BY created_at, user_id")
         return [_gm(r) for r in rows]
 
-    async def insert_gm(self, user_id: int, role_id: int) -> None:
-        """Register a new GM. The caller must check that no record exists yet."""
+    async def insert_gm(self, user_id: int) -> None:
+        """Register a new GM without a group role. The caller must check that no record exists yet."""
         await self._write(
-            "INSERT INTO gms(user_id, role_id, active, needs_repair, created_at) VALUES(?, ?, 1, 0, ?)",
-            (user_id, role_id, _now()),
+            "INSERT INTO gms(user_id, role_id, active, created_at) VALUES(?, NULL, 1, ?)",
+            (user_id, _now()),
         )
 
-    async def reactivate_gm(self, user_id: int, role_id: int) -> None:
-        """Re-register an orphaned GM, possibly with a different group role."""
-        await self._write(
-            "UPDATE gms SET role_id = ?, active = 1, needs_repair = 0 WHERE user_id = ?", (role_id, user_id)
-        )
+    async def reactivate_gm(self, user_id: int) -> None:
+        """Re-register an orphaned GM. Their group role and players stay as they were."""
+        await self._write("UPDATE gms SET active = 1 WHERE user_id = ?", (user_id,))
 
     async def deactivate_gm(self, user_id: int) -> None:
         """Unregister a GM but keep their group rows (orphaned group)."""
@@ -179,13 +176,8 @@ class Database:
             await self.conn.rollback()
             raise
 
-    async def set_role_id(self, user_id: int, role_id: int) -> None:
-        await self._write(
-            "UPDATE gms SET role_id = ?, needs_repair = 0 WHERE user_id = ?", (role_id, user_id)
-        )
-
-    async def set_needs_repair(self, user_id: int, flag: bool) -> None:
-        await self._write("UPDATE gms SET needs_repair = ? WHERE user_id = ?", (int(flag), user_id))
+    async def set_group_role(self, user_id: int, role_id: int) -> None:
+        await self._write("UPDATE gms SET role_id = ? WHERE user_id = ?", (role_id, user_id))
 
     # -- group members -----------------------------------------------------
     async def is_member(self, gm_id: int, player_id: int) -> bool:
