@@ -215,6 +215,31 @@ async def test_remove_player_not_in_group(env):
         await env.svc.remove_player(env.guild, 10, pat)
 
 
+async def test_remove_all_players(env):
+    _, _, role = await make_gm(env)
+    pats = [env.guild.add_member(i, f"P{i}") for i in (20, 21)]
+    for pat in pats:
+        await env.svc.add_player(env.guild, 10, pat)
+    assert await env.svc.remove_all_players(env.guild, 10) == 2
+    assert await env.svc.list_players(10) == []
+    assert all(role not in pat.roles for pat in pats)
+    assert await env.db.get_gm(10) is not None
+
+
+async def test_leave_group(env):
+    _, _, role_a = await make_gm(env, id=10, name="Alice")
+    _, _, role_b = await make_gm(env, id=11, name="Bob")
+    pat = env.guild.add_member(20, "Pat")
+    await env.svc.add_player(env.guild, 10, pat)
+    await env.svc.add_player(env.guild, 11, pat)
+    assert sorted(await env.svc.groups_of(20)) == [10, 11]
+    await env.svc.leave_group(env.guild, 10, pat)
+    assert role_a not in pat.roles and role_b in pat.roles
+    assert await env.svc.groups_of(20) == [11]
+    with pytest.raises(ServiceError, match="not in that GM's group"):
+        await env.svc.leave_group(env.guild, 10, pat)
+
+
 async def test_non_gm_cannot_manage_group(env):
     pat = env.guild.add_member(20, "Pat")
     with pytest.raises(ServiceError, match="not a GM"):

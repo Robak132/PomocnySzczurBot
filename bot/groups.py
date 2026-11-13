@@ -408,6 +408,33 @@ class GroupService:
             await _safe(member.remove_roles(role, reason=f"Removed from group of GM {gm_id}"), "remove the group role")
         await self.audit(actor_id, "player_removed", member.id, gm_id)
 
+    async def remove_all_players(
+        self, guild: discord.Guild, gm_id: int, *, actor_id: int | None = None
+    ) -> int:
+        """Remove every player from a GM's group. Returns how many were removed."""
+        gm = await self._require_gm(gm_id)
+        role = guild.get_role(gm.role_id) if gm.role_id is not None else None
+        removed = 0
+        for pid in await self.db.list_members(gm_id):
+            await self.db.remove_member(gm_id, pid)
+            removed += 1
+            member = guild.get_member(pid)
+            if role is not None and member is not None and role in member.roles:
+                await _safe(member.remove_roles(role, reason=f"Group of GM {gm_id} cleared"), "remove the group role")
+        await self.audit(actor_id, "players_removed_all", gm_user_id=gm_id, detail=f"{removed} player(s)")
+        return removed
+
+    async def leave_group(self, guild: discord.Guild, gm_id: int, member: discord.Member) -> None:
+        """A player leaves a GM's group by themselves."""
+        await self._require_gm(gm_id)
+        if not await self.db.is_member(gm_id, member.id):
+            raise ServiceError("You are not in that GM's group.")
+        await self.remove_player(guild, gm_id, member, actor_id=member.id)
+
+    async def groups_of(self, player_id: int) -> list[int]:
+        """IDs of the (active) GMs whose group the player is in."""
+        return [gm.user_id for gm in await self.db.list_gms() if await self.db.is_member(gm.user_id, player_id)]
+
     async def list_players(self, gm_id: int) -> list[int]:
         await self._require_gm(gm_id)
         return await self.db.list_members(gm_id)

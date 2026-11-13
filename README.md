@@ -33,7 +33,9 @@ On first start the bot creates a role named **GM** (or use `/admin set-role role
 |---|---|
 | `/group add user` | Add a player to your group (grants your group role) |
 | `/group remove user` | Remove a player from your group |
+| `/group remove-all` | Remove all players from your group (asks for confirmation) |
 | `/group list` | List your players |
+| `/player remove gm` | Leave a GM's group you are in (asks for confirmation). The GM is pinged in the channel |
 
 **Admins** (visible only to members with the Administrator permission, plus the optional `ADMIN_ROLE_ID` role)
 

@@ -2,7 +2,7 @@ import discord
 from discord.ext import commands
 
 from bot.cogs.admin import AdminCog
-from bot.cogs.group import GroupCog
+from bot.cogs.group import GroupCog, PlayerCog
 from bot.db import Database
 from bot.groups import GroupService
 
@@ -10,6 +10,8 @@ EXPECTED = {
     "group add",
     "group remove",
     "group list",
+    "group remove-all",
+    "player remove",
     "admin gm add",
     "admin gm set-group-role",
     "admin gm remove",
@@ -29,6 +31,7 @@ async def test_command_tree_matches_spec(tmp_path):
     admin_cog = AdminCog(bot, service)
     await bot.add_cog(group_cog)
     await bot.add_cog(admin_cog)
+    await bot.add_cog(PlayerCog(bot, service))
 
     names = {
         c.qualified_name for c in bot.tree.walk_commands() if isinstance(c, discord.app_commands.Command)

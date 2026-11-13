@@ -10,7 +10,7 @@ from discord.ext import commands
 from .checks import AccessTree
 from .cogs.admin import AdminCog
 from .cogs.events import EventsCog
-from .cogs.group import GroupCog
+from .cogs.group import GroupCog, PlayerCog
 from .config import Config
 from .db import Database
 from .exceptions import DatabaseVersionError, ServiceError
@@ -34,6 +34,7 @@ class PermissionBot(commands.Bot):
     async def setup_hook(self) -> None:
         await self.db.connect()
         await self.add_cog(GroupCog(self, self.service))
+        await self.add_cog(PlayerCog(self, self.service))
         await self.add_cog(AdminCog(self, self.service))
         await self.add_cog(EventsCog(self, self.service, self.config.guild_id))
         self.tree.on_error = on_tree_error

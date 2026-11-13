@@ -61,7 +61,9 @@ Discord is the source of truth for role membership. The DB records ownership and
 |---|---|
 | `/group add user:@member` | Adds the member to the caller's group and grants the group role |
 | `/group remove user:@member` | Removes the member and revokes the group role. Only members of the caller's own group |
+| `/group remove-all` | Removes every player from the caller's group and revokes the group role. Requires confirmation button (GM only, times out after 60 s) |
 | `/group list` | Lists the caller's players (ephemeral) |
+| `/player remove gm:@gm` | Any member leaves a group they are in (`gm` autocomplete lists only their GMs) and loses the group role. Requires confirmation, which says the GM will be notified; afterwards a public message in the same channel pings only the GM: "@Player left @GM's group." |
 
 ### 5.2 Admin commands (caller must be admin)
 | Command | Behavior |
