@@ -69,7 +69,7 @@ Discord is the source of truth for role membership. The DB records ownership and
 | `/admin gm add user:@member` | Assigns the GM role and registers the user. No group role is created. A previously orphaned GM gets their old group role and players back |
 | `/admin gm set-group-role user:@member [role:@role] [name]` | Sets the GM's group role: with `role`, that existing role (see 5.3); without it, a newly created role named `name` (1-100 chars, unique among bot-managed roles) or the GM's display name. Recorded players are given the new role. The previous group role is never deleted; it is only taken from the group's players. The GM does not receive the group role |
 | `/admin gm remove user:@member [keep_role]` | Revokes the GM role, unregisters the GM, and **deletes the group role by default** (`keep_role:true` keeps it). Requires confirmation button |
-| `/admin list` | Lists all GMs with group name and player count |
+| `/admin list` | Lists all GMs with group role, player count and the players of each group (split into several messages if it is long) |
 | `/admin set-role [role:@role] [name]` | With `role`: designates that existing role as the GM role and registers its holders as GMs, without group roles. Without it: creates a new GM role named `name` (default "GM") and designates it. `role` and `name` together are refused |
 | `/admin player add gm:@gm user:@member` | Adds a player to that GM's group |
 | `/admin player remove gm:@gm user:@member` | Removes a player from that GM's group |

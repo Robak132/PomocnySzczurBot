@@ -8,7 +8,7 @@ from discord.ext import commands
 from ..checks import is_admin
 from ..exceptions import NotAdmin, ServiceError
 from ..groups import GroupService
-from ..ui import ConfirmView, guild_of, mention_list, reply
+from ..ui import ConfirmView, guild_of, mention_line, mention_list, reply, reply_lines
 
 
 @app_commands.default_permissions(administrator=True)
@@ -115,7 +115,7 @@ class AdminCog(commands.GroupCog, group_name="admin", group_description="Server 
         )
         await reply(interaction, f"{user.mention} is no longer a GM.")
 
-    @app_commands.command(name="list", description="List all GMs")
+    @app_commands.command(name="list", description="List all GMs and the players in each group")
     async def gm_list(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
         gms = await self.service.db.list_gms()
@@ -124,14 +124,18 @@ class AdminCog(commands.GroupCog, group_name="admin", group_description="Server 
             return
         lines = []
         for gm in gms:
-            count = await self.service.db.count_members(gm.user_id)
+            players = await self.service.db.list_members(gm.user_id)
             if gm.role_id is None:
                 role_text = "no group role yet"
             else:
                 role = guild_of(interaction).get_role(gm.role_id)
                 role_text = f"**{role.name}**" if role else "⚠ role missing (run /admin sync)"
-            lines.append(f"- <@{gm.user_id}> · {role_text} · {count} player(s)")
-        await reply(interaction, "\n".join(lines))
+            if lines:
+                lines.append("")  # blank line between groups
+            lines.append(f"<@{gm.user_id}> · {role_text} · {len(players)} player(s)")
+            if players:
+                lines.append(mention_line(players))
+        await reply_lines(interaction, lines)
 
     # ------------------------------------------------------------------
     # /admin set-role
@@ -185,7 +189,7 @@ class AdminCog(commands.GroupCog, group_name="admin", group_description="Server 
         if not players:
             await reply(interaction, f"<@{gm_id}>'s group has no players.")
             return
-        await reply(interaction, f"**<@{gm_id}>'s group ({len(players)}):**\n{mention_list(players)}")
+        await reply(interaction, f"**<@{gm_id}>'s group ({len(players)}):** {mention_line(players)}")
 
     @player_add.autocomplete("gm")
     async def _player_add_gm(self, interaction: discord.Interaction, current: str):
@@ -207,7 +211,7 @@ class AdminCog(commands.GroupCog, group_name="admin", group_description="Server 
         await interaction.response.defer(ephemeral=True)
         report = await self.service.sync(guild_of(interaction), actor_id=interaction.user.id)
         problems = await self.service.check_hierarchy(guild_of(interaction))
-        parts = ["\n".join(f"- {line}" for line in report) if report else "Everything is in sync."]
+        parts = ["\n".join(report) if report else "Everything is in sync."]
         if problems:
-            parts.append("**Problems:**\n" + "\n".join(f"- {p}" for p in problems))
+            parts.append("**Problems:**\n" + "\n".join(problems))
         await reply(interaction, "\n\n".join(parts))

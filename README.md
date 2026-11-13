@@ -42,7 +42,7 @@ On first start the bot creates a role named **GM** (or use `/admin set-role role
 | `/admin gm add user` | Give the GM role. No group role is created |
 | `/admin gm set-group-role user [role] [name]` | With `role`: use that existing role as the GM's group role, and its current holders become players. Without it: create a new role (named `name`, or the GM's display name). Players move to the new role; the old role stays on the server and is only taken from the players |
 | `/admin gm remove user [keep_role]` | Remove a GM. Deletes their group role unless `keep_role` is set |
-| `/admin list` | List GMs, group role names and player counts |
+| `/admin list` | List all GMs with their group role, player count and players |
 | `/admin set-role [role] [name]` | With `role`: use that existing role as the GM role and register its holders as GMs. Without it: create a new GM role (named `name`, default GM) |
 | `/admin player add\|remove gm user` | Add or remove a player in any GM's group (pick the GM from autocomplete) |
 | `/admin gm list gm` | List the players of a GM's group |

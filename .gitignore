@@ -1,5 +1,31 @@
+# Secrets: real settings live in .env (copy .env.example)
 .env
+.env.*
+!.env.example
+
+# Database and its backups (e.g. bot.db.old)
 *.db
+*.db.*
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Python
 __pycache__/
-.pytest_cache/
+*.py[cod]
 .venv/
+venv/
+*.egg-info/
+
+# Tools and caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+.DS_Store

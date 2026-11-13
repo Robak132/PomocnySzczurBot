@@ -7,7 +7,7 @@ from discord.ext import commands
 
 from ..exceptions import NotGM
 from ..groups import GroupService
-from ..ui import guild_of, mention_list, reply
+from ..ui import guild_of, mention_line, reply
 
 
 class GroupCog(commands.GroupCog, group_name="group", group_description="Manage your group of players"):
@@ -45,4 +45,4 @@ class GroupCog(commands.GroupCog, group_name="group", group_description="Manage 
         if not players:
             await reply(interaction, "Your group has no players yet.")
             return
-        await reply(interaction, f"**Your group ({len(players)}):**\n{mention_list(players)}")
+        await reply(interaction, f"**Your group ({len(players)}):** {mention_line(players)}")
