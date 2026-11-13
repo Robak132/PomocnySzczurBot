@@ -4,14 +4,12 @@ from discord.ext import commands
 from bot.cogs.admin import AdminCog
 from bot.cogs.group import GroupCog
 from bot.db import Database
-from bot.services.groups import GroupService
+from bot.groups import GroupService
 
 EXPECTED = {
     "group add",
     "group remove",
     "group list",
-    "group rename",
-    "group color",
     "admin gm add",
     "admin gm remove",
     "admin gm list",

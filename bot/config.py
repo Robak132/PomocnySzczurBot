@@ -16,7 +16,7 @@ class Config:
     db_path: str = "bot.db"
 
     @classmethod
-    def from_env(cls) -> "Config":
+    def from_env(cls) -> Config:
         load_dotenv()
 
         def required(name: str) -> str:

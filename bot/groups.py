@@ -6,55 +6,23 @@ validation. Every user-facing failure is raised as ServiceError.
 from __future__ import annotations
 
 import logging
-import math
-import re
-import time
-from typing import Awaitable, Callable, Optional
+from collections.abc import Awaitable, Callable
 
 import discord
 
-from ..checks import is_admin
-from ..db import Database, GmRecord
+from .checks import is_admin
+from .constants import (
+    ELEVATED_PERMISSIONS,
+    GM_ROLE_KEY,
+    MAX_ROLE_NAME,
+)
+from .db import Database, GmRecord
+from .exceptions import ServiceError
 
 log = logging.getLogger(__name__)
 
-RATE_LIMIT_SECONDS = 10
-GM_ROLE_KEY = "gm_role_id"
-MAX_ROLE_NAME = 100
 
-NAMED_COLORS = {
-    "red": 0xE74C3C,
-    "orange": 0xE67E22,
-    "yellow": 0xF1C40F,
-    "green": 0x2ECC71,
-    "teal": 0x1ABC9C,
-    "blue": 0x3498DB,
-    "purple": 0x9B59B6,
-    "pink": 0xE91E63,
-    "grey": 0x95A5A6,
-    "gray": 0x95A5A6,
-    "white": 0xFFFFFF,
-    "black": 0x010101,
-}
-_HEX = re.compile(r"^#?([0-9a-f]{6})$", re.IGNORECASE)
-
-AuditHook = Callable[[Optional[int], str, Optional[int], Optional[int], Optional[str]], Awaitable[None]]
-
-
-class ServiceError(Exception):
-    """An error whose message is safe to show to the user."""
-
-
-def parse_color(text: str) -> discord.Colour:
-    value = text.strip().lower()
-    if value in NAMED_COLORS:
-        return discord.Colour(NAMED_COLORS[value])
-    match = _HEX.match(value)
-    if match:
-        return discord.Colour(int(match.group(1), 16))
-    raise ServiceError(
-        "Invalid color. Use a hex code like #FF8800 or one of: " + ", ".join(sorted(NAMED_COLORS)) + "."
-    )
+AuditHook = Callable[[int | None, str, int | None, int | None, str | None], Awaitable[None]]
 
 
 async def _safe(coro, what: str):
@@ -76,13 +44,10 @@ class GroupService:
         db: Database,
         admin_role_id: int | None = None,
         on_audit: AuditHook | None = None,
-        clock: Callable[[], float] = time.monotonic,
     ):
         self.db = db
         self.admin_role_id = admin_role_id
         self.on_audit = on_audit
-        self._clock = clock
-        self._last_change: dict[int, float] = {}
 
     # ------------------------------------------------------------------
     # helpers
@@ -99,7 +64,7 @@ class GroupService:
         if self.on_audit:
             try:
                 await self.on_audit(actor_id, action, target_id, gm_user_id, detail)
-            except Exception:  # logging must never break a command
+            except discord.HTTPException:  # logging must never break a command
                 log.exception("Audit hook failed")
 
     async def is_gm(self, user_id: int) -> bool:
@@ -111,7 +76,8 @@ class GroupService:
             raise ServiceError("That user is not a GM.")
         return gm
 
-    def _group_role(self, guild: discord.Guild, gm: GmRecord) -> discord.Role:
+    @staticmethod
+    def _group_role(guild: discord.Guild, gm: GmRecord) -> discord.Role:
         role = guild.get_role(gm.role_id)
         if role is None:
             raise ServiceError("This group's role is missing. An admin should run `/admin sync`.")
@@ -165,14 +131,6 @@ class GroupService:
             n += 1
             candidate = f"{base} {n}"
         return candidate
-
-    def _check_rate(self, gm_id: int) -> None:
-        last = self._last_change.get(gm_id)
-        if last is not None:
-            elapsed = self._clock() - last
-            if elapsed < RATE_LIMIT_SECONDS:
-                wait = math.ceil(RATE_LIMIT_SECONDS - elapsed)
-                raise ServiceError(f"Please wait {wait}s before changing this role again.")
 
     async def _grant_to_players(self, guild: discord.Guild, gm_id: int, role: discord.Role) -> None:
         for pid in await self.db.list_members(gm_id):
@@ -230,12 +188,32 @@ class GroupService:
         await self.db.set_setting(GM_ROLE_KEY, str(role.id))
         await self.audit(actor_id, "gm_role_set", detail=f"{role.name} ({role.id})")
         registered = []
-        for member in list(role.members):
+        for member in role.members:
             if member.bot or await self.db.get_gm(member.id):
                 continue
             await self.register_gm(guild, member, actor_id=actor_id, assign_gm_role=False)
             registered.append(member)
         return registered
+
+    async def _check_adoptable(self, guild: discord.Guild, role: discord.Role, gm_id: int) -> None:
+        """Validate an existing role before it becomes a GM's group role."""
+        if role.is_default():
+            raise ServiceError("@everyone can't be a group role.")
+        if role.managed:
+            raise ServiceError("That role is managed by an integration and can't be used.")
+        gm_role = await self._peek_gm_role(guild)
+        if gm_role is not None and role.id == gm_role.id:
+            raise ServiceError("The GM role can't also be a group role.")
+        owner = await self.db.get_gm_by_role(role.id, include_inactive=True)
+        if owner is not None and owner.user_id != gm_id:
+            raise ServiceError(f"**{role.name}** is already the group role of <@{owner.user_id}>.")
+        risky = [p for p in ELEVATED_PERMISSIONS if getattr(role.permissions, p, False)]
+        if risky:
+            raise ServiceError(
+                f"**{role.name}** has elevated permissions ({', '.join(risky)}). "
+                "Its GM could hand them out to players, so remove them from the role first."
+            )
+        self._check_manageable(guild, role)
 
     # ------------------------------------------------------------------
     # GM registration
@@ -246,33 +224,83 @@ class GroupService:
         member: discord.Member,
         *,
         name: str | None = None,
-        color: str | None = None,
         actor_id: int | None = None,
         assign_gm_role: bool = True,
+        role: discord.Role | None = None,
     ) -> GmRecord:
         """Make a member a GM: give them the GM role and create their group role.
 
-        The GM never receives their own group role; only their players do.
+        ``name`` names a newly created group role. The bot never renames an
+        existing role, so ``name`` is refused when a role is adopted or reused.
+
+        If ``role`` is given, that existing role becomes the group role instead
+        of creating a new one, and everyone already holding it (except the GM)
+        is recorded as a player. The GM never receives their own group role;
+        only their players do.
         """
+        existing = await self._check_can_register(member)
+        if role is not None:
+            await self._check_adoptable(guild, role, member.id)
+        reused = role or (guild.get_role(existing.role_id) if existing else None)
+        if name and reused is not None:
+            raise ServiceError(
+                f"**{reused.name}** already exists and the bot doesn't rename roles. "
+                "Leave out `name`, or rename the role in Discord."
+            )
+        if name:
+            await self._validate_name(guild, name)  # validate before changing anything
+        gm_role = await self.get_gm_role(guild, create=True)
+        if assign_gm_role:
+            self._check_manageable(guild, gm_role)
+
+        group_role, created = await self._prepare_group_role(guild, member, existing, role, name)
+        if existing:
+            await self.db.reactivate_gm(member.id, group_role.id)
+        else:
+            await self.db.insert_gm(member.id, group_role.id)
+        if existing and (created or existing.role_id != group_role.id):
+            await self._grant_to_players(guild, member.id, group_role)
+
+        if assign_gm_role and gm_role not in member.roles:
+            await self._give_gm_role_or_rollback(member, gm_role, group_role, existing, created)
+        if group_role in member.roles:  # a GM does not hold their own group role
+            await _safe(member.remove_roles(group_role, reason="GMs don't hold their group role"), "update roles")
+
+        detail = f"group role {group_role.name} ({group_role.id})"
+        if role is not None:
+            imported = await self._import_holders(member.id, group_role)
+            detail = f"adopted existing role {group_role.name} ({group_role.id}), imported {imported} player(s)"
+        await self.audit(actor_id, "gm_added", member.id, member.id, detail)
+        return GmRecord(member.id, group_role.id, True, False)
+
+    async def _check_can_register(self, member: discord.Member) -> GmRecord | None:
+        """Raise if the member can't become a GM; return their orphaned record, if any."""
         if member.bot:
             raise ServiceError("Bots can't be GMs.")
         existing = await self.db.get_gm(member.id, include_inactive=True)
         if existing and existing.active:
             raise ServiceError(f"{member.display_name} is already a GM.")
+        return existing
 
-        colour = parse_color(color) if color else None  # validate before changing anything
-        gm_role = await self.get_gm_role(guild, create=True)
-        if assign_gm_role:
-            self._check_manageable(guild, gm_role)
+    async def _prepare_group_role(
+        self,
+        guild: discord.Guild,
+        member: discord.Member,
+        existing: GmRecord | None,
+        adopted: discord.Role | None,
+        name: str | None,
+    ) -> tuple[discord.Role, bool]:
+        """Return the GM's group role and whether it was newly created.
 
-        role = guild.get_role(existing.role_id) if existing else None
-        created = False
+        Uses the adopted role, else the role of an orphaned group, else creates one.
+        """
+        role = adopted
+        if role is None and existing:
+            role = guild.get_role(existing.role_id)
         if role is None:
-            role_name = await self._pick_name(guild, name, member)
             role = await _safe(
                 guild.create_role(
-                    name=role_name,
-                    colour=colour or discord.Colour.default(),
+                    name=await self._pick_name(guild, name, member),
                     permissions=discord.Permissions.none(),
                     hoist=False,
                     mentionable=False,
@@ -280,40 +308,42 @@ class GroupService:
                 ),
                 "create the group role",
             )
-            created = True
-        else:
-            self._check_manageable(guild, role)
-            edits: dict = {}
-            if name:
-                edits["name"] = await self._pick_name(guild, name, member, exclude_gm=member.id)
-            if colour:
-                edits["colour"] = colour
-            if edits:
-                await _safe(role.edit(reason="GM re-registered", **edits), "update the group role")
+            return role, True
 
-        await self.db.upsert_gm(member.id, role.id)
-        if created and existing:
-            await self._grant_to_players(guild, member.id, role)
+        self._check_manageable(guild, role)
+        return role, False
 
-        if assign_gm_role and gm_role not in member.roles:
-            try:
-                await _safe(member.add_roles(gm_role, reason="Registered as GM"), "assign the GM role")
-            except ServiceError:
-                if existing:
-                    await self.db.deactivate_gm(member.id)
-                else:
-                    await self.db.delete_gm(member.id)
-                if created:
-                    try:
-                        await role.delete(reason="Rolling back GM registration")
-                    except discord.HTTPException:
-                        log.warning("Could not delete role %s while rolling back", role.id)
-                raise
-        if role in member.roles:  # a GM does not hold their own group role
-            await _safe(member.remove_roles(role, reason="GMs don't hold their group role"), "update roles")
+    async def _give_gm_role_or_rollback(
+        self,
+        member: discord.Member,
+        gm_role: discord.Role,
+        group_role: discord.Role,
+        existing: GmRecord | None,
+        created: bool,
+    ) -> None:
+        try:
+            await _safe(member.add_roles(gm_role, reason="Registered as GM"), "assign the GM role")
+        except ServiceError:
+            if existing:
+                await self.db.deactivate_gm(member.id)
+            else:
+                await self.db.delete_gm(member.id)
+            if created:
+                try:
+                    await group_role.delete(reason="Rolling back GM registration")
+                except discord.HTTPException:
+                    log.warning("Could not delete role %s while rolling back", group_role.id)
+            raise
 
-        await self.audit(actor_id, "gm_added", member.id, member.id, f"group role {role.name} ({role.id})")
-        return GmRecord(member.id, role.id, True, False)
+    async def _import_holders(self, gm_id: int, role: discord.Role) -> int:
+        """Record everyone holding ``role`` (except bots and the GM) as players. Returns how many were new."""
+        imported = 0
+        for holder in role.members:
+            if holder.bot or holder.id == gm_id or await self.db.is_member(gm_id, holder.id):
+                continue
+            await self.db.add_member(gm_id, holder.id)
+            imported += 1
+        return imported
 
     async def unregister_gm(
         self,
@@ -359,8 +389,9 @@ class GroupService:
             raise ServiceError("GMs can't be added as players.")
         role = self._group_role(guild, gm)
         self._check_manageable(guild, role)
-        if not await self.db.add_member(gm_id, member.id):
+        if await self.db.is_member(gm_id, member.id):
             raise ServiceError(f"{member.display_name} is already in this group.")
+        await self.db.add_member(gm_id, member.id)
         try:
             await _safe(member.add_roles(role, reason=f"Added to group of GM {gm_id}"), "assign the group role")
         except ServiceError:
@@ -382,35 +413,6 @@ class GroupService:
     async def list_players(self, gm_id: int) -> list[int]:
         await self._require_gm(gm_id)
         return await self.db.list_members(gm_id)
-
-    # ------------------------------------------------------------------
-    # rank cosmetics
-    # ------------------------------------------------------------------
-    async def rename_group(
-        self, guild: discord.Guild, gm_id: int, name: str, *, actor_id: int | None = None
-    ) -> str:
-        gm = await self._require_gm(gm_id)
-        role = self._group_role(guild, gm)
-        self._check_rate(gm_id)
-        new_name = await self._validate_name(guild, name, exclude_gm=gm_id)
-        self._check_manageable(guild, role)
-        await _safe(role.edit(name=new_name, reason=f"Renamed by {actor_id}"), "rename the role")
-        self._last_change[gm_id] = self._clock()
-        await self.audit(actor_id, "group_renamed", gm_user_id=gm_id, detail=new_name)
-        return new_name
-
-    async def recolor_group(
-        self, guild: discord.Guild, gm_id: int, color: str, *, actor_id: int | None = None
-    ) -> discord.Colour:
-        gm = await self._require_gm(gm_id)
-        role = self._group_role(guild, gm)
-        self._check_rate(gm_id)
-        colour = parse_color(color)
-        self._check_manageable(guild, role)
-        await _safe(role.edit(colour=colour, reason=f"Recolored by {actor_id}"), "change the role color")
-        self._last_change[gm_id] = self._clock()
-        await self.audit(actor_id, "group_recolored", gm_user_id=gm_id, detail=str(colour))
-        return colour
 
     # ------------------------------------------------------------------
     # sync and health checks
@@ -444,56 +446,73 @@ class GroupService:
         report: list[str] = []
         gm_role = await self.get_gm_role(guild)
 
-        for member in list(gm_role.members):
+        for member in gm_role.members:
             if member.bot or await self.db.get_gm(member.id):
                 continue
             await self.register_gm(guild, member, actor_id=actor_id, assign_gm_role=False)
             report.append(f"Registered {member.mention} as a GM (they held the GM role).")
 
         for gm in await self.db.list_gms():
-            member = guild.get_member(gm.user_id)
-            if member is None or gm_role not in member.roles:
-                await self.unregister_gm(guild, gm.user_id, keep_role=True, revoke_gm_role=False, actor_id=actor_id)
-                report.append(f"Unregistered <@{gm.user_id}> (no longer a GM). Their group role was kept.")
-                continue
-
-            role = guild.get_role(gm.role_id)
-            players = await self.db.list_members(gm.user_id)
-            if role is None:
-                role = await _safe(
-                    guild.create_role(
-                        name=await self._pick_name(guild, None, member, exclude_gm=gm.user_id),
-                        permissions=discord.Permissions.none(),
-                        hoist=False,
-                        mentionable=False,
-                        reason="Recreating missing group role",
-                    ),
-                    "recreate the group role",
-                )
-                await self.db.set_role_id(gm.user_id, role.id)
-                await self._grant_to_players(guild, gm.user_id, role)
-                report.append(f"Recreated the missing group role **{role.name}** for {member.mention}.")
-                continue
-
-            if role in member.roles:
-                await _safe(member.remove_roles(role, reason="GMs don't hold their group role"), "update roles")
-                report.append(f"Removed the group role from its own GM {member.mention}.")
-
-            holders = {m.id for m in role.members if not m.bot}
-            for pid in players:
-                player = guild.get_member(pid)
-                if player is None:
-                    await self.db.remove_member(gm.user_id, pid)
-                    report.append(f"Dropped <@{pid}> from {member.mention}'s group (left the server).")
-                elif pid not in holders:
-                    await self.db.remove_member(gm.user_id, pid)
-                    report.append(f"Dropped {player.mention} from {member.mention}'s group (no longer holds the role).")
-            for pid in sorted(holders - set(players) - {gm.user_id}):
-                await self.db.add_member(gm.user_id, pid)
-                report.append(f"Added <@{pid}> to {member.mention}'s group (held the role in Discord).")
+            report.extend(await self._sync_gm(guild, gm, gm_role, actor_id))
 
         if report:
             await self.audit(actor_id, "sync", detail=f"{len(report)} change(s)")
+        return report
+
+    async def _sync_gm(
+        self, guild: discord.Guild, gm: GmRecord, gm_role: discord.Role, actor_id: int | None
+    ) -> list[str]:
+        member = guild.get_member(gm.user_id)
+        if member is None or gm_role not in member.roles:
+            await self.unregister_gm(guild, gm.user_id, keep_role=True, revoke_gm_role=False, actor_id=actor_id)
+            return [f"Unregistered <@{gm.user_id}> (no longer a GM). Their group role was kept."]
+
+        role = guild.get_role(gm.role_id)
+        if role is None:
+            role = await self._recreate_group_role(guild, gm, member)
+            return [f"Recreated the missing group role **{role.name}** for {member.mention}."]
+
+        report: list[str] = []
+        if role in member.roles:
+            await _safe(member.remove_roles(role, reason="GMs don't hold their group role"), "update roles")
+            report.append(f"Removed the group role from its own GM {member.mention}.")
+        report.extend(await self._sync_players(guild, gm, member, role))
+        return report
+
+    async def _recreate_group_role(self, guild: discord.Guild, gm: GmRecord, member: discord.Member) -> discord.Role:
+        role = await _safe(
+            guild.create_role(
+                name=await self._pick_name(guild, None, member, exclude_gm=gm.user_id),
+                permissions=discord.Permissions.none(),
+                hoist=False,
+                mentionable=False,
+                reason="Recreating missing group role",
+            ),
+            "recreate the group role",
+        )
+        await self.db.set_role_id(gm.user_id, role.id)
+        await self._grant_to_players(guild, gm.user_id, role)
+        return role
+
+    async def _sync_players(
+        self, guild: discord.Guild, gm: GmRecord, member: discord.Member, role: discord.Role
+    ) -> list[str]:
+        """Make the recorded players match who holds the group role in Discord."""
+        report: list[str] = []
+        players = await self.db.list_members(gm.user_id)
+        holders = {m.id for m in role.members if not m.bot}
+        for pid in players:
+            player = guild.get_member(pid)
+            if player is not None and pid in holders:
+                continue
+            await self.db.remove_member(gm.user_id, pid)
+            if player is None:
+                report.append(f"Dropped <@{pid}> from {member.mention}'s group (left the server).")
+            else:
+                report.append(f"Dropped {player.mention} from {member.mention}'s group (no longer holds the role).")
+        for pid in sorted(holders - set(players) - {gm.user_id}):
+            await self.db.add_member(gm.user_id, pid)
+            report.append(f"Added <@{pid}> to {member.mention}'s group (held the role in Discord).")
         return report
 
     # ------------------------------------------------------------------

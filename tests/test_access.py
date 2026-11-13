@@ -2,7 +2,8 @@ from types import SimpleNamespace
 
 import discord
 
-from bot.checks import AccessTree, NO_ACCESS_MESSAGE, has_access
+from bot.checks import AccessTree, has_access
+from bot.constants import NO_ACCESS_MESSAGE
 
 
 def member(*role_ids):

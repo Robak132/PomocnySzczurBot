@@ -6,7 +6,8 @@ import logging
 import discord
 from discord.ext import commands
 
-from ..services.groups import GroupService, ServiceError
+from ..exceptions import ServiceError
+from ..groups import GroupService
 
 log = logging.getLogger(__name__)
 

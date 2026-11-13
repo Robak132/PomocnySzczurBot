@@ -3,13 +3,7 @@ from __future__ import annotations
 import discord
 from discord import app_commands
 
-
-class NotAdmin(app_commands.CheckFailure):
-    """Raised when a non-admin runs an admin command."""
-
-
-class NotGM(app_commands.CheckFailure):
-    """Raised when a non-GM runs a GM command."""
+from .constants import NO_ACCESS_MESSAGE
 
 
 def is_admin(member: discord.Member, admin_role_id: int | None = None) -> bool:
@@ -25,9 +19,6 @@ def has_access(member: discord.abc.User, access_role_id: int | None) -> bool:
         return True
     roles = getattr(member, "roles", None) or []
     return any(r.id == access_role_id for r in roles)
-
-
-NO_ACCESS_MESSAGE = "You don't have access to this bot."
 
 
 class AccessTree(app_commands.CommandTree):

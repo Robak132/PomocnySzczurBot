@@ -4,7 +4,7 @@ Manages GMs and their groups of players on one Discord server. Full design: [doc
 
 - **Admins** assign the shared **GM** role and manage every group.
 - Each **GM** gets one **group role** (their "rank"). Players hold it; the GM does not.
-- **GMs** add, remove and list their own players, and rename or recolor their group role.
+- **GMs** add, remove and list their own players.
 - A player can be in several groups. Admins and GMs can't be added as players.
 
 ## Setup
@@ -34,14 +34,12 @@ On first start the bot creates a role named **GM** (or use `/admin gm-role set` 
 | `/group add user` | Add a player to your group (grants your group role) |
 | `/group remove user` | Remove a player from your group |
 | `/group list` | List your players |
-| `/group rename name` | Rename your group role |
-| `/group color color` | Recolor it (`#RRGGBB` or a name like `red`) |
 
 **Admins** (visible only to members with the Administrator permission, plus the optional `ADMIN_ROLE_ID` role)
 
 | Command | What it does |
 |---|---|
-| `/admin gm add user [name] [color]` | Give the GM role and create their group role |
+| `/admin gm add user [name] [role]` | Give the GM role and create their group role (`name` sets the new role's name). With `role`, an existing role becomes the group role and its current holders become players |
 | `/admin gm remove user [keep_role]` | Remove a GM. Deletes their group role unless `keep_role` is set |
 | `/admin gm list` | List GMs, group role names and player counts |
 | `/admin gm-role set role` / `create [name]` | Choose or create the GM role |
@@ -54,7 +52,7 @@ On first start the bot creates a role named **GM** (or use `/admin gm-role set` 
   Taking it away unregisters them but keeps the group role and players, so a slip loses nothing.
 - If a member leaves the server they are dropped from every group. If a GM leaves, their group is kept orphaned.
 - If a group role is deleted, the bot flags it. `/admin sync` recreates it and gives it back to the group's players.
-- Role renames and recolors are limited to one change per group every 10 seconds.
+- The bot never renames or recolors existing roles. Admins do that in Discord's server settings.
 - Every change is stored in the `audit_log` table, and posted to `LOG_CHANNEL_ID` if set.
 - If `ACCESS_ROLE_ID` is set, only members with that role can use any command (admins included).
   Everyone else gets "You don't have access to this bot." and autocomplete stays empty for them.

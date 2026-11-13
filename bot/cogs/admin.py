@@ -1,17 +1,17 @@
 """/admin commands, for managing GMs and every group."""
 from __future__ import annotations
 
-from typing import Optional
-
 import discord
 from discord import app_commands
 from discord.ext import commands
 
-from ..checks import NotAdmin, is_admin
-from ..services.groups import GroupService, ServiceError
-from ..ui import ConfirmView, mention_list, reply
+from ..checks import is_admin
+from ..exceptions import NotAdmin, ServiceError
+from ..groups import GroupService
+from ..ui import ConfirmView, guild_of, mention_list, reply
 
 
+@app_commands.default_permissions(administrator=True)
 class AdminCog(commands.GroupCog, group_name="admin", group_description="Server administration"):
     gm = app_commands.Group(name="gm", description="Manage GMs")
     gm_role = app_commands.Group(name="gm-role", description="Choose or create the GM role")
@@ -21,7 +21,6 @@ class AdminCog(commands.GroupCog, group_name="admin", group_description="Server 
         self.bot = bot
         self.service = service
         super().__init__()
-        self.app_command.default_permissions = discord.Permissions(administrator=True)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.guild is None or not isinstance(interaction.user, discord.Member):
@@ -43,7 +42,7 @@ class AdminCog(commands.GroupCog, group_name="admin", group_description="Server 
     async def _gm_autocomplete(self, interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
         choices = []
         for gm in await self.service.db.list_gms():
-            member = interaction.guild.get_member(gm.user_id)
+            member = interaction.guild.get_member(gm.user_id) if interaction.guild else None
             label = member.display_name if member else str(gm.user_id)
             if current.lower() in label.lower():
                 choices.append(app_commands.Choice(name=label[:100], value=str(gm.user_id)))
@@ -52,25 +51,30 @@ class AdminCog(commands.GroupCog, group_name="admin", group_description="Server 
     # ------------------------------------------------------------------
     # /admin gm ...
     # ------------------------------------------------------------------
-    @gm.command(name="add", description="Make a member a GM and create their group role")
+    @gm.command(name="add", description="Make a member a GM and create or assign their group role")
     @app_commands.describe(
         user="Member to promote",
-        name="Group role name (default: their display name)",
-        color="Group role color, e.g. #FF8800 or red",
+        name="Name for the new group role (default: their display name). Not allowed with role",
+        role="Use this existing role as the group role; its current holders become players",
     )
     async def gm_add(
         self,
         interaction: discord.Interaction,
         user: discord.Member,
-        name: Optional[str] = None,
-        color: Optional[str] = None,
+        name: str | None = None,
+        role: discord.Role | None = None,
     ) -> None:
         await interaction.response.defer(ephemeral=True)
         record = await self.service.register_gm(
-            interaction.guild, user, name=name, color=color, actor_id=interaction.user.id
+            guild_of(interaction), user, name=name, role=role, actor_id=interaction.user.id
         )
-        role = interaction.guild.get_role(record.role_id)
-        await reply(interaction, f"{user.mention} is now a GM. Their group role is **{role.name}**.")
+        group_role = guild_of(interaction).get_role(record.role_id)
+        role_name = group_role.name if group_role else str(record.role_id)
+        message = f"{user.mention} is now a GM. Their group role is **{role_name}**."
+        if role is not None:
+            players = await self.service.db.count_members(user.id)
+            message += f" It now has {players} player(s), including everyone who already held the role."
+        await reply(interaction, message)
 
     @gm.command(name="remove", description="Remove a GM and, by default, delete their group role")
     @app_commands.describe(user="GM to remove", keep_role="Keep the group role and its players")
@@ -97,7 +101,7 @@ class AdminCog(commands.GroupCog, group_name="admin", group_description="Server 
         if not view.value:
             return
         await self.service.unregister_gm(
-            interaction.guild, user.id, keep_role=keep_role, actor_id=interaction.user.id
+            guild_of(interaction), user.id, keep_role=keep_role, actor_id=interaction.user.id
         )
         await reply(interaction, f"{user.mention} is no longer a GM.")
 
@@ -110,7 +114,7 @@ class AdminCog(commands.GroupCog, group_name="admin", group_description="Server 
             return
         lines = []
         for gm in gms:
-            role = interaction.guild.get_role(gm.role_id)
+            role = guild_of(interaction).get_role(gm.role_id)
             count = await self.service.db.count_members(gm.user_id)
             role_text = f"**{role.name}**" if role else "⚠ role missing (run /admin sync)"
             lines.append(f"<@{gm.user_id}> · {role_text} · {count} player(s)")
@@ -123,7 +127,7 @@ class AdminCog(commands.GroupCog, group_name="admin", group_description="Server 
     @app_commands.describe(role="The role that marks GMs")
     async def gm_role_set(self, interaction: discord.Interaction, role: discord.Role) -> None:
         await interaction.response.defer(ephemeral=True)
-        registered = await self.service.set_gm_role(interaction.guild, role, actor_id=interaction.user.id)
+        registered = await self.service.set_gm_role(guild_of(interaction), role, actor_id=interaction.user.id)
         text = f"**{role.name}** is now the GM role."
         if registered:
             text += f" Registered {len(registered)} existing holder(s) as GMs: {mention_list([m.id for m in registered])}."
@@ -133,7 +137,7 @@ class AdminCog(commands.GroupCog, group_name="admin", group_description="Server 
     @app_commands.describe(name="Role name (default: GM)")
     async def gm_role_create(self, interaction: discord.Interaction, name: str = "GM") -> None:
         await interaction.response.defer(ephemeral=True)
-        role = await self.service.create_gm_role(interaction.guild, name, actor_id=interaction.user.id)
+        role = await self.service.create_gm_role(guild_of(interaction), name, actor_id=interaction.user.id)
         await reply(interaction, f"Created the GM role **{role.name}**.")
 
     # ------------------------------------------------------------------
@@ -144,7 +148,7 @@ class AdminCog(commands.GroupCog, group_name="admin", group_description="Server 
     async def player_add(self, interaction: discord.Interaction, gm: str, user: discord.Member) -> None:
         await interaction.response.defer(ephemeral=True)
         gm_id = self._gm_id(gm)
-        await self.service.add_player(interaction.guild, gm_id, user, actor_id=interaction.user.id)
+        await self.service.add_player(guild_of(interaction), gm_id, user, actor_id=interaction.user.id)
         await reply(interaction, f"Added {user.mention} to <@{gm_id}>'s group.")
 
     @player.command(name="remove", description="Remove a player from a GM's group")
@@ -152,7 +156,7 @@ class AdminCog(commands.GroupCog, group_name="admin", group_description="Server 
     async def player_remove(self, interaction: discord.Interaction, gm: str, user: discord.Member) -> None:
         await interaction.response.defer(ephemeral=True)
         gm_id = self._gm_id(gm)
-        await self.service.remove_player(interaction.guild, gm_id, user, actor_id=interaction.user.id)
+        await self.service.remove_player(guild_of(interaction), gm_id, user, actor_id=interaction.user.id)
         await reply(interaction, f"Removed {user.mention} from <@{gm_id}>'s group.")
 
     @player.command(name="list", description="List the players of a GM's group")
@@ -184,8 +188,8 @@ class AdminCog(commands.GroupCog, group_name="admin", group_description="Server 
     @app_commands.command(name="sync", description="Reconcile the bot's records with Discord's roles")
     async def sync(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
-        report = await self.service.sync(interaction.guild, actor_id=interaction.user.id)
-        problems = await self.service.check_hierarchy(interaction.guild)
+        report = await self.service.sync(guild_of(interaction), actor_id=interaction.user.id)
+        problems = await self.service.check_hierarchy(guild_of(interaction))
         parts = ["\n".join(f"• {line}" for line in report) if report else "Everything is in sync."]
         if problems:
             parts.append("**Problems:**\n" + "\n".join(f"• {p}" for p in problems))

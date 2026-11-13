@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import discord
 
-NO_MENTIONS = discord.AllowedMentions.none()
-MAX_LEN = 1900
+from .constants import MAX_MESSAGE_LEN, NO_MENTIONS
+from .exceptions import ServiceError
 
 
 def _clip(text: str) -> str:
-    return text if len(text) <= MAX_LEN else text[: MAX_LEN - 1] + "…"
+    return text if len(text) <= MAX_MESSAGE_LEN else text[: MAX_MESSAGE_LEN - 1] + "…"
 
 
 async def reply(interaction: discord.Interaction, content: str, **kwargs) -> None:
@@ -21,6 +21,13 @@ async def respond(interaction: discord.Interaction, content: str) -> None:
         await reply(interaction, content)
     else:
         await interaction.response.send_message(_clip(content), ephemeral=True, allowed_mentions=NO_MENTIONS)
+
+
+def guild_of(interaction: discord.Interaction) -> discord.Guild:
+    """The server a command was used in. Commands don't work in DMs."""
+    if interaction.guild is None:
+        raise ServiceError("Use this command in the server.")
+    return interaction.guild
 
 
 def mention_list(user_ids: list[int]) -> str:

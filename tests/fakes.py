@@ -5,12 +5,15 @@ import itertools
 from functools import total_ordering
 from types import SimpleNamespace
 
+import discord
+
 _ids = itertools.count(1000)
 
 
 @total_ordering
 class FakeRole:
-    def __init__(self, guild, id, name, position, colour=None, managed=False):
+    def __init__(self, guild, id, name, position, colour=None, managed=False, permissions=None):
+        self.permissions = permissions or discord.Permissions.none()
         self.guild = guild
         self.id = id
         self.name = name
@@ -93,6 +96,12 @@ class FakeGuild:
     async def create_role(self, **kwargs):
         self._position += 1
         role = FakeRole(self, next(_ids), kwargs["name"], self._position, kwargs.get("colour"))
+        self.roles[role.id] = role
+        return role
+
+    def add_role(self, name, position=None, permissions=None, managed=False):
+        self._position += 1
+        role = FakeRole(self, next(_ids), name, position or self._position, permissions=permissions, managed=managed)
         self.roles[role.id] = role
         return role
 

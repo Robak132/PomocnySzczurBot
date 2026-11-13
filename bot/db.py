@@ -1,9 +1,16 @@
 from __future__ import annotations
 
 import datetime as dt
+import sqlite3
 from dataclasses import dataclass
 
 import aiosqlite
+
+from .exceptions import DatabaseVersionError
+
+# Bump this whenever SCHEMA changes. The bot refuses to start on a database
+# with a different version instead of trying to upgrade it.
+SCHEMA_VERSION = 1
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS gms (
@@ -14,7 +21,7 @@ CREATE TABLE IF NOT EXISTS gms (
     created_at   TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS group_members (
-    gm_user_id INTEGER NOT NULL REFERENCES gms(user_id) ON DELETE CASCADE,
+    gm_user_id INTEGER NOT NULL REFERENCES gms(user_id),
     player_id  INTEGER NOT NULL,
     added_at   TEXT NOT NULL,
     PRIMARY KEY (gm_user_id, player_id)
@@ -48,10 +55,12 @@ class GmRecord:
     needs_repair: bool
 
 
-def _gm(row: aiosqlite.Row | None) -> GmRecord | None:
-    if row is None:
-        return None
+def _gm(row: aiosqlite.Row) -> GmRecord:
     return GmRecord(row["user_id"], row["role_id"], bool(row["active"]), bool(row["needs_repair"]))
+
+
+def _gm_or_none(row: aiosqlite.Row | None) -> GmRecord | None:
+    return None if row is None else _gm(row)
 
 
 class Database:
@@ -60,29 +69,59 @@ class Database:
         self._conn: aiosqlite.Connection | None = None
 
     async def connect(self) -> None:
-        self._conn = await aiosqlite.connect(self.path)
-        self._conn.row_factory = aiosqlite.Row
-        await self._conn.execute("PRAGMA foreign_keys = ON")
-        await self._conn.executescript(SCHEMA)
-        await self._conn.commit()
+        """Open the database, creating the schema if the file is new.
+
+        Raises DatabaseVersionError if the file was made for a different schema version.
+        """
+        conn = await aiosqlite.connect(self.path)
+        conn.row_factory = aiosqlite.Row
+        self._conn = conn
+        try:
+            await conn.execute("PRAGMA foreign_keys = ON")
+            version = await self._value("PRAGMA user_version")
+            is_empty = await self._one("SELECT 1 FROM sqlite_master WHERE type = 'table'") is None
+            if version == 0 and is_empty:
+                await conn.executescript(SCHEMA + f"PRAGMA user_version = {SCHEMA_VERSION};")
+                await conn.commit()
+            elif version != SCHEMA_VERSION:
+                raise DatabaseVersionError(
+                    f"Database {self.path} has schema version {version}, but this bot needs version "
+                    f"{SCHEMA_VERSION}. Back it up and remove it, or run the bot version that created it."
+                )
+        except (DatabaseVersionError, sqlite3.Error):
+            await self.close()
+            raise
 
     async def close(self) -> None:
         if self._conn is not None:
             await self._conn.close()
             self._conn = None
 
+    @property
+    def conn(self) -> aiosqlite.Connection:
+        if self._conn is None:
+            raise RuntimeError("The database is not connected. Call connect() first.")
+        return self._conn
+
     # -- helpers -----------------------------------------------------------
+    async def _value(self, sql: str, params: tuple = ()):
+        """Return the first column of a query that always yields one row (COUNT, PRAGMA)."""
+        row = await self._one(sql, params)
+        if row is None:
+            raise RuntimeError(f"Query returned no rows: {sql}")
+        return row[0]
+
     async def _one(self, sql: str, params: tuple = ()):
-        cur = await self._conn.execute(sql, params)
+        cur = await self.conn.execute(sql, params)
         return await cur.fetchone()
 
     async def _all(self, sql: str, params: tuple = ()):
-        cur = await self._conn.execute(sql, params)
+        cur = await self.conn.execute(sql, params)
         return await cur.fetchall()
 
     async def _write(self, sql: str, params: tuple = ()) -> int:
-        cur = await self._conn.execute(sql, params)
-        await self._conn.commit()
+        cur = await self.conn.execute(sql, params)
+        await self.conn.commit()
         return cur.rowcount
 
     # -- settings ----------------------------------------------------------
@@ -91,32 +130,39 @@ class Database:
         return row["value"] if row else None
 
     async def set_setting(self, key: str, value: str) -> None:
-        await self._write(
-            "INSERT INTO settings(key, value) VALUES(?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (key, value),
-        )
+        if await self._one("SELECT 1 FROM settings WHERE key = ?", (key,)):
+            await self._write("UPDATE settings SET value = ? WHERE key = ?", (value, key))
+        else:
+            await self._write("INSERT INTO settings(key, value) VALUES(?, ?)", (key, value))
 
     # -- GMs ---------------------------------------------------------------
     async def get_gm(self, user_id: int, include_inactive: bool = False) -> GmRecord | None:
         sql = "SELECT * FROM gms WHERE user_id = ?"
         if not include_inactive:
             sql += " AND active = 1"
-        return _gm(await self._one(sql, (user_id,)))
+        return _gm_or_none(await self._one(sql, (user_id,)))
 
-    async def get_gm_by_role(self, role_id: int) -> GmRecord | None:
-        return _gm(await self._one("SELECT * FROM gms WHERE role_id = ? AND active = 1", (role_id,)))
+    async def get_gm_by_role(self, role_id: int, include_inactive: bool = False) -> GmRecord | None:
+        sql = "SELECT * FROM gms WHERE role_id = ?"
+        if not include_inactive:
+            sql += " AND active = 1"
+        return _gm_or_none(await self._one(sql, (role_id,)))
 
-    async def list_gms(self) -> list[GmRecord | None]:
+    async def list_gms(self) -> list[GmRecord]:
         rows = await self._all("SELECT * FROM gms WHERE active = 1 ORDER BY created_at, user_id")
         return [_gm(r) for r in rows]
 
-    async def upsert_gm(self, user_id: int, role_id: int) -> None:
-        """Insert a GM, or reactivate an orphaned one."""
+    async def insert_gm(self, user_id: int, role_id: int) -> None:
+        """Register a new GM. The caller must check that no record exists yet."""
         await self._write(
-            "INSERT INTO gms(user_id, role_id, active, needs_repair, created_at) VALUES(?, ?, 1, 0, ?) "
-            "ON CONFLICT(user_id) DO UPDATE SET role_id = excluded.role_id, active = 1, needs_repair = 0",
+            "INSERT INTO gms(user_id, role_id, active, needs_repair, created_at) VALUES(?, ?, 1, 0, ?)",
             (user_id, role_id, _now()),
+        )
+
+    async def reactivate_gm(self, user_id: int, role_id: int) -> None:
+        """Re-register an orphaned GM, possibly with a different group role."""
+        await self._write(
+            "UPDATE gms SET role_id = ?, active = 1, needs_repair = 0 WHERE user_id = ?", (role_id, user_id)
         )
 
     async def deactivate_gm(self, user_id: int) -> None:
@@ -124,8 +170,14 @@ class Database:
         await self._write("UPDATE gms SET active = 0 WHERE user_id = ?", (user_id,))
 
     async def delete_gm(self, user_id: int) -> None:
-        """Delete a GM and (via cascade) their group rows."""
-        await self._write("DELETE FROM gms WHERE user_id = ?", (user_id,))
+        """Delete a GM together with their group rows, explicitly and in one transaction."""
+        try:
+            await self.conn.execute("DELETE FROM group_members WHERE gm_user_id = ?", (user_id,))
+            await self.conn.execute("DELETE FROM gms WHERE user_id = ?", (user_id,))
+            await self.conn.commit()
+        except sqlite3.Error:
+            await self.conn.rollback()
+            raise
 
     async def set_role_id(self, user_id: int, role_id: int) -> None:
         await self._write(
@@ -136,12 +188,18 @@ class Database:
         await self._write("UPDATE gms SET needs_repair = ? WHERE user_id = ?", (int(flag), user_id))
 
     # -- group members -----------------------------------------------------
-    async def add_member(self, gm_id: int, player_id: int) -> bool:
-        changed = await self._write(
-            "INSERT OR IGNORE INTO group_members(gm_user_id, player_id, added_at) VALUES(?, ?, ?)",
+    async def is_member(self, gm_id: int, player_id: int) -> bool:
+        row = await self._one(
+            "SELECT 1 FROM group_members WHERE gm_user_id = ? AND player_id = ?", (gm_id, player_id)
+        )
+        return row is not None
+
+    async def add_member(self, gm_id: int, player_id: int) -> None:
+        """Record a player in a group. The caller must check is_member first."""
+        await self._write(
+            "INSERT INTO group_members(gm_user_id, player_id, added_at) VALUES(?, ?, ?)",
             (gm_id, player_id, _now()),
         )
-        return changed > 0
 
     async def remove_member(self, gm_id: int, player_id: int) -> bool:
         changed = await self._write(
@@ -157,8 +215,7 @@ class Database:
         return [r["player_id"] for r in rows]
 
     async def count_members(self, gm_id: int) -> int:
-        row = await self._one("SELECT COUNT(*) AS n FROM group_members WHERE gm_user_id = ?", (gm_id,))
-        return row["n"]
+        return await self._value("SELECT COUNT(*) FROM group_members WHERE gm_user_id = ?", (gm_id,))
 
     async def remove_player_everywhere(self, player_id: int) -> list[int]:
         rows = await self._all("SELECT gm_user_id FROM group_members WHERE player_id = ?", (player_id,))
