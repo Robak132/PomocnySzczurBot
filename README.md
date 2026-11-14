@@ -5,7 +5,7 @@ Manages GMs and their groups of players on one Discord server. Full design: [doc
 - **Admins** assign the shared **GM** role and manage every group.
 - Each **GM** can have one **group role** (their "rank"). Players hold it; the GM does not. A new GM has none until an admin sets or creates one.
 - **GMs** add, remove and list their own players.
-- A player can be in several groups. Admins and GMs can't be added as players.
+- A player can be in several groups. GMs can play in other GMs' groups, but not in their own. Admins can't be added as players.
 
 ## Setup
 

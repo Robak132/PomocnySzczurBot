@@ -192,14 +192,20 @@ async def test_duplicate_player_rejected(env):
         await env.svc.add_player(env.guild, 10, pat)
 
 
-async def test_gms_admins_and_bots_cannot_be_players(env):
+async def test_admins_and_bots_cannot_be_players(env):
     await make_gm(env, id=10, name="Alice")
-    other_gm, _, _ = await make_gm(env, id=11, name="Bob")
     admin = env.guild.add_member(21, "Root", admin=True)
     bot = env.guild.add_member(22, "Botty", bot=True)
-    for target in (other_gm, admin, bot):
+    for target in (admin, bot):
         with pytest.raises(ServiceError):
             await env.svc.add_player(env.guild, 10, target)
+
+
+async def test_gm_can_play_in_another_gms_group(env):
+    await make_gm(env, id=10, name="Alice")
+    other_gm, _, _ = await make_gm(env, id=11, name="Bob")
+    await env.svc.add_player(env.guild, 10, other_gm)
+    assert await env.db.is_member(10, other_gm.id)
 
 
 async def test_gm_cannot_add_themselves(env):
