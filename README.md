@@ -13,6 +13,8 @@ Manages GMs and their groups of players on one Discord server. Full design: [doc
    Under **Bot → Privileged Gateway Intents** enable **Server Members Intent**.
 2. Invite the bot with the scopes `bot` and `applications.commands` and the **Manage Roles** permission.
 3. In Server Settings → Roles, drag the bot's role **above** the GM role and all group roles it will manage.
+   For `/admin gm setup` the bot also needs **Administrator**, or every permission the category standard sets
+   (Discord only lets a bot allow or deny permissions it has itself). The command lists any that are missing.
    The bot warns at startup (and in `/admin sync`) if a role is out of reach.
 4. Install and configure:
 
@@ -42,6 +44,7 @@ On first start the bot creates a role named **GM** (or use `/admin set-role role
 | Command | What it does |
 |---|---|
 | `/admin gm add user` | Give the GM role. No group role is created |
+| `/admin gm setup user [name]` | Create a GM's category with the standard permissions, named `name` (default: their display name). The member must already be a GM with a group role (`/admin gm add`, then `/admin gm set-group-role`) |
 | `/admin gm set-group-role user [role] [name]` | With `role`: use that existing role as the GM's group role, and its current holders become players. Without it: create a new role (named `name`, or the GM's display name). Players move to the new role; the old role stays on the server and is only taken from the players |
 | `/admin gm remove user [keep_role]` | Remove a GM. Deletes their group role unless `keep_role` is set |
 | `/admin list` | List all GMs with their group role, player count and players |
@@ -57,6 +60,13 @@ On first start the bot creates a role named **GM** (or use `/admin set-role role
 - If a member leaves the server they are dropped from every group. If a GM leaves, their group is kept orphaned.
 - If a group role is deleted, the bot flags it. `/admin sync` recreates it and gives it back to the group's players.
 - The bot never renames or recolors existing roles. Admins do that in Discord's server settings.
+- GM categories follow a fixed standard (`bot/category_permissions.py`): @everyone is denied everything,
+  the group role gets 24 player permissions, the GM gets those plus 9 management permissions (not Manage Permissions),
+  **UkryjWszystko** is denied View/Read History/Connect and **Poszukiwacz przygód** is allowed Read History.
+  If either of those two roles doesn't exist, its overwrite is skipped and the reply says so.
+  New channels a GM makes in the category inherit these permissions; the bot doesn't touch channels.
+- Changing a GM's group role later (`/admin gm set-group-role`) also moves the category's player overwrite to the
+  new role and re-syncs channels that were synced. Removing a GM leaves their category alone.
 - Every change is stored in the `audit_log` table, and posted to `LOG_CHANNEL_ID` if set.
 - If `ACCESS_ROLE_ID` is set, only members with that role can use any command (admins included).
   Everyone else gets "You don't have access to this bot." and autocomplete stays empty for them.

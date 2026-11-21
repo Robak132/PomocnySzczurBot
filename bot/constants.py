@@ -8,6 +8,8 @@ NO_ACCESS_MESSAGE = "You don't have access to this bot."
 
 # -- Groups and roles ------------------------------------------------------
 GM_ROLE_KEY = "gm_role_id"
+# settings key holding a GM's category ID: CATEGORY_KEY_PREFIX + str(gm_user_id)
+CATEGORY_KEY_PREFIX = "gm_category:"
 
 MAX_ROLE_NAME = 100
 

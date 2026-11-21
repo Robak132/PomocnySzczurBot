@@ -14,6 +14,7 @@ EXPECTED = {
     "player remove",
     "admin gm add",
     "admin gm set-group-role",
+    "admin gm setup",
     "admin gm remove",
     "admin list",
     "admin set-role",

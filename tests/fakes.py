@@ -75,11 +75,64 @@ class FakeMember:
                 self.roles.remove(role)
 
 
+class _Roles(dict):
+    """Roles keyed by ID; iterating yields the roles themselves, like ``Guild.roles``."""
+
+    def __iter__(self):
+        return iter(list(self.values()))
+
+
+class FakeChannel:
+    def __init__(self, guild, id, name, category=None, synced=True):
+        self.guild = guild
+        self.id = id
+        self.name = name
+        self.category = category
+        self.overwrites = dict(category.overwrites) if category else {}
+        self._synced = synced
+
+    @property
+    def permissions_synced(self):
+        return self._synced and self.category is not None and self.overwrites == self.category.overwrites
+
+    async def edit(self, sync_permissions=False, reason=None, **kwargs):
+        if sync_permissions and self.category is not None:
+            self.overwrites = dict(self.category.overwrites)
+            self._synced = True
+
+
+class FakeCategory:
+    def __init__(self, guild, id, name, overwrites):
+        self.guild = guild
+        self.id = id
+        self.name = name
+        self.overwrites = dict(overwrites)
+        self.channels = []
+
+    async def set_permissions(self, target, *, overwrite=None, reason=None):
+        if overwrite is None:
+            self.overwrites.pop(target, None)
+        else:
+            self.overwrites[target] = overwrite
+
+    async def delete(self, reason=None):
+        self.guild.channels.pop(self.id, None)
+
+    def add_channel(self, name, synced=True):
+        channel = FakeChannel(self.guild, next(_ids), name, category=self, synced=synced)
+        self.channels.append(channel)
+        self.guild.channels[channel.id] = channel
+        return channel
+
+
 class FakeGuild:
     def __init__(self):
         self.id = 1
-        self.roles = {}
+        self.roles = _Roles()
         self.members = {}
+        self.channels = {}
+        self.default_role = FakeRole(self, self.id, "@everyone", 0)
+        self.fail_category = False
         self._position = 1
         self.me = FakeMember(self, 999, "Bot", bot=True)
         self.me.guild_permissions.manage_roles = True
@@ -92,6 +145,20 @@ class FakeGuild:
 
     def get_member(self, member_id):
         return self.members.get(member_id)
+
+    def get_channel(self, channel_id):
+        return self.channels.get(channel_id)
+
+    @property
+    def categories(self):
+        return [c for c in self.channels.values() if isinstance(c, FakeCategory)]
+
+    async def create_category(self, name, *, overwrites=None, reason=None, position=None):
+        if self.fail_category:
+            raise discord.Forbidden(SimpleNamespace(status=403, reason="Forbidden"), "Missing Permissions")
+        category = FakeCategory(self, next(_ids), name, overwrites or {})
+        self.channels[category.id] = category
+        return category
 
     async def create_role(self, **kwargs):
         self._position += 1

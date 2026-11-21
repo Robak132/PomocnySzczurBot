@@ -7,11 +7,20 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 
 import discord
 
+from .category_permissions import (
+    HIDE_ROLE_NAME,
+    SEEKER_ROLE_NAME,
+    category_overwrites,
+    missing_bot_permissions,
+    player_overwrite,
+)
 from .checks import is_admin
 from .constants import (
+    CATEGORY_KEY_PREFIX,
     ELEVATED_PERMISSIONS,
     GM_ROLE_KEY,
     MAX_ROLE_NAME,
@@ -20,6 +29,15 @@ from .db import Database, GmRecord
 from .exceptions import ServiceError
 
 log = logging.getLogger(__name__)
+
+
+@dataclass
+class GmSetup:
+    """What ``GroupService.setup_gm`` did."""
+
+    category: object  # discord.CategoryChannel
+    group_role: discord.Role
+    missing_roles: list[str] = field(default_factory=list)  # standard roles not found on the server
 
 
 AuditHook = Callable[[int | None, str, int | None, int | None, str | None], Awaitable[None]]
@@ -300,6 +318,7 @@ class GroupService:
             await _safe(gm_member.remove_roles(new_role, reason="GMs don't hold their group role"), "update roles")
         if old_role is not None:
             await self._take_role_from_players(gm_id, old_role)
+        await self._swap_category_role(guild, gm_id, old_role, new_role)
 
         action = "created" if created else "set"
         await self.audit(actor_id, f"group_role_{action}", gm_user_id=gm_id, detail=f"{new_role.name} ({new_role.id})")
@@ -368,6 +387,88 @@ class GroupService:
         await self.audit(
             actor_id, "gm_removed", user_id, user_id, "group role kept" if keep_role else "group role deleted"
         )
+
+    # ------------------------------------------------------------------
+    # GM categories
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _role_named(guild: discord.Guild, name: str) -> discord.Role | None:
+        return discord.utils.find(lambda r: r.name == name, guild.roles)
+
+    async def get_category(self, guild: discord.Guild, gm_id: int):
+        """The GM's category, or None if they have none (or it was deleted)."""
+        raw = await self.db.get_setting(f"{CATEGORY_KEY_PREFIX}{gm_id}")
+        return guild.get_channel(int(raw)) if raw else None
+
+    @staticmethod
+    def _check_category_permissions(guild: discord.Guild) -> None:
+        missing = missing_bot_permissions(guild.me.guild_permissions)
+        if missing:
+            names = ", ".join(missing)
+            raise ServiceError(
+                "To create a GM category with the standard permissions I need Administrator, "
+                f"or all of these permissions: {names}."
+            )
+
+    async def setup_gm(
+        self,
+        guild: discord.Guild,
+        member: discord.Member,
+        *,
+        name: str | None = None,
+        actor_id: int | None = None,
+    ) -> GmSetup:
+        """Create a GM's category with the standard permissions.
+
+        The member must already be a GM with a group role, because the category's
+        player overwrite points at that role.
+        """
+        if await self.db.get_gm(member.id) is None:
+            raise ServiceError(
+                f"{member.display_name} isn't a GM. Make them one with `/admin gm add` "
+                "and give them a group role with `/admin gm set-group-role` first."
+            )
+        group_role = self._group_role(guild, await self._require_gm(member.id))
+        existing_category = await self.get_category(guild, member.id)
+        if existing_category is not None:
+            raise ServiceError(f"{member.display_name} already has the category **{existing_category.name}**.")
+        cat_name = (name if name is not None else member.display_name or "").strip()
+        if not 1 <= len(cat_name) <= MAX_ROLE_NAME:
+            raise ServiceError(f"The category name must be 1-{MAX_ROLE_NAME} characters.")
+        if any(c.name.casefold() == cat_name.casefold() for c in guild.categories):
+            raise ServiceError(f"A category named **{cat_name}** already exists. Pick another `name`.")
+        self._check_category_permissions(guild)
+
+        hide_role = self._role_named(guild, HIDE_ROLE_NAME)
+        seeker_role = self._role_named(guild, SEEKER_ROLE_NAME)
+        category = await _safe(
+            guild.create_category(
+                cat_name,
+                overwrites=category_overwrites(guild.default_role, member, group_role, hide_role, seeker_role),
+                reason=f"Category for GM {member}",
+            ),
+            "create the category",
+        )
+        await self.db.set_setting(f"{CATEGORY_KEY_PREFIX}{member.id}", str(category.id))
+        await self.audit(actor_id, "gm_category_created", member.id, member.id, f"{category.name} ({category.id})")
+        missing = [n for n, r in ((HIDE_ROLE_NAME, hide_role), (SEEKER_ROLE_NAME, seeker_role)) if r is None]
+        return GmSetup(category, group_role, missing)
+
+    async def _swap_category_role(
+        self, guild: discord.Guild, gm_id: int, old_role: discord.Role | None, new_role: discord.Role
+    ) -> None:
+        """Point the GM category's player overwrite at the new group role, keeping synced channels synced."""
+        category = await self.get_category(guild, gm_id)
+        if category is None:
+            return
+        synced = [c for c in category.channels if c.permissions_synced]
+        if old_role is not None and old_role in category.overwrites:
+            await _safe(category.set_permissions(old_role, overwrite=None, reason="Group role changed"),
+                        "update the category permissions")
+        await _safe(category.set_permissions(new_role, overwrite=player_overwrite(), reason="Group role changed"),
+                    "update the category permissions")
+        for channel in synced:
+            await _safe(channel.edit(sync_permissions=True, reason="Group role changed"), "sync a channel's permissions")
 
     # ------------------------------------------------------------------
     # players

@@ -69,6 +69,7 @@ Discord is the source of truth for role membership. The DB records ownership and
 | Command | Behavior |
 |---|---|
 | `/admin gm add user:@member` | Assigns the GM role and registers the user. No group role is created. A previously orphaned GM gets their old group role and players back |
+| `/admin gm setup user:@member [name]` | Creates the GM's category (section) with the standard permissions (see 5.4), named `name` (default: their display name). The member must already be a GM with a group role, because the category's player overwrite points at it; otherwise the command is refused and nothing is created. Also refused if they already have a category or a category with that name exists |
 | `/admin gm set-group-role user:@member [role:@role] [name]` | Sets the GM's group role: with `role`, that existing role (see 5.3); without it, a newly created role named `name` (1-100 chars, unique among bot-managed roles) or the GM's display name. Recorded players are given the new role. The previous group role is never deleted; it is only taken from the group's players. The GM does not receive the group role |
 | `/admin gm remove user:@member [keep_role]` | Revokes the GM role, unregisters the GM, and **deletes the group role by default** (`keep_role:true` keeps it). Requires confirmation button |
 | `/admin list` | Lists all GMs with group role, player count and the players of each group (split into several messages if it is long) |
@@ -88,6 +89,19 @@ Autocomplete for the `gm` argument lists registered GMs. The argument is a text 
 - Also refused where it can't work: @everyone and integration-managed roles (Discord won't assign them), roles above the bot, the GM role, and another GM's group role (active or orphaned).
 - Afterwards it behaves like any group role. `/admin gm remove` deletes it unless `keep_role` is set.
 
+### 5.4 GM categories
+`/admin gm setup` creates a category with five overwrites, defined in `bot/category_permissions.py` and derived from the GM categories on KRT (doc "KRT - standard GM category permissions"):
+
+| Overwrite on | Setting |
+|---|---|
+| @everyone | Deny all 39 channel permissions |
+| Group role | Allow 24 player permissions (view, chat, threads, files, reactions, emoji, stickers, mentions, history, voice messages, polls, invites, voice, video, soundboard, activities, voice status, app commands) |
+| The GM (member) | Allow the player permissions + Manage Channels, Manage Messages, Pin Messages, Bypass Slowmode, Manage Threads, Move Members, Use External Apps, Create/Manage Events. Not Manage Permissions |
+| UkryjWszystko | Deny View Channels, Read Message History, Connect |
+| Poszukiwacz przygód | Allow Read Message History |
+
+The last two roles are looked up by name; a missing one is skipped and reported. The category ID is stored in `settings` under `gm_category:<gm user id>`. The bot creates no channels: channels the GM creates in the category inherit its permissions, and the bot never edits channels except to re-sync channels that were synced when the group role changes (`set-group-role` moves the category's player overwrite to the new role). Removing a GM leaves the category in place.
+
 ## 6. Rules and validation
 1. Permission checks run before any action. Failures return an ephemeral error, never a partial change.
 2. A user cannot be added to a group they are already in, but may be in other groups. Cannot add a bot account. A GM cannot add an admin or themselves as a player. Another GM can be added (GMs may play in each other's groups).
@@ -101,6 +115,7 @@ Autocomplete for the `gm` argument lists registered GMs. The argument is a text 
 
 ## 7. Discord permissions and hierarchy
 - Bot requires: **Manage Roles**. Server Members intent enabled.
+- `/admin gm setup` additionally needs **Administrator**, or every permission the category standard allows or denies, because Discord only lets a bot set permissions it has. The command checks first and lists what is missing.
 - The bot's top role must sit **above** the GM role and all group roles in the role hierarchy. Otherwise Discord rejects edits. The bot checks this at startup and reports clearly.
 - Group roles are created with no extra permissions and are not mentionable by default (optional setting).
 - Command visibility: `/group *` is visible to all, but enforced by GM check. `/admin *` uses `default_permissions` set to Administrator and is also checked at runtime.
@@ -129,6 +144,7 @@ bot/
   constants.py       # shared constants (limits, permissions, messages)
   exceptions.py      # all exception classes
   groups.py          # GroupService: role create/edit, add/remove logic shared by all cogs
+  category_permissions.py  # the standard GM category overwrites
   cogs/
     group.py         # GM commands
     admin.py         # admin commands
@@ -140,10 +156,10 @@ All cogs call the same `GroupService`, so GM and admin actions share validation.
 
 ## 11. Testing
 - Unit tests for the service layer with a mocked guild and in-memory SQLite.
-- Manual test checklist: assign GM role (via bot and by hand), confirm the GM does not receive their own group role, add/remove/list as GM, admin add/remove/list per GM, member leaves, role deleted manually, hierarchy misconfigured.
+- Manual test checklist: `/admin gm setup` (check the category's five overwrites, that the GM holds the GM role but not the group role, and that a channel created in it is synced), assign GM role (via bot and by hand), confirm the GM does not receive their own group role, add/remove/list as GM, admin add/remove/list per GM, member leaves, role deleted manually, hierarchy misconfigured.
 
 ## 12. Out of scope (v1)
-Channel-level permission overwrites, multiple roles per GM, web dashboard, scheduled cleanup, multi-server support.
+Per-channel permission overwrites (only the GM category itself is managed), multiple roles per GM, web dashboard, scheduled cleanup, multi-server support.
 
 ## 13. Decisions
 1. Players may be in several groups: yes.

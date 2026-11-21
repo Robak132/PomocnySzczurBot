@@ -63,6 +63,26 @@ class AdminCog(commands.GroupCog, group_name="admin", group_description="Server 
             message += f" They got their previous group role back: **{role.name if role else record.role_id}**."
         await reply(interaction, message)
 
+    @gm.command(name="setup", description="Create a GM's category with the standard permissions")
+    @app_commands.describe(
+        user="The GM (must already have a group role)",
+        name="Category name (default: their display name)",
+    )
+    async def gm_setup(self, interaction: discord.Interaction, user: discord.Member, name: str | None = None) -> None:
+        await interaction.response.defer(ephemeral=True)
+        result = await self.service.setup_gm(guild_of(interaction), user, name=name, actor_id=interaction.user.id)
+        lines = [
+            f"Created the category **{result.category.name}** for {user.mention}.",
+            f"Players get in through **{result.group_role.name}**.",
+        ]
+        if result.missing_roles:
+            lines.append(
+                "⚠ No role named " + " or ".join(f"**{n}**" for n in result.missing_roles)
+                + " on the server, so the category has no overwrite for it."
+            )
+        lines.append("The category was added at the bottom of the channel list; drag it where you want it.")
+        await reply(interaction, "\n".join(lines))
+
     @gm.command(name="set-group-role", description="Set an existing role as a GM's group role, or create a new one")
     @app_commands.describe(
         user="The GM",
