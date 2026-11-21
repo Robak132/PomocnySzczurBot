@@ -104,7 +104,7 @@ The last two roles are looked up by name; a missing one is skipped and reported.
 
 ## 6. Rules and validation
 1. Permission checks run before any action. Failures return an ephemeral error, never a partial change.
-2. A user cannot be added to a group they are already in, but may be in other groups. Cannot add a bot account. A GM cannot add an admin or themselves as a player. Another GM can be added (GMs may play in each other's groups).
+2. A user cannot be added to a group they are already in, but may be in other groups. Cannot add a bot account. A GM cannot add themselves as a player; admins can be added like anyone else. Another GM can be added (GMs may play in each other's groups).
 3. Removing a GM via `/admin gm remove` deletes their group role (unless `keep_role:true`) and deletes their `group_members` rows. If the role is kept, rows are kept and the group is marked orphaned.
 3a. If someone gains the GM role in Discord outside the bot, `on_member_update` registers them as a GM (without a group role). If they lose it, they are unregistered like `/admin gm remove`, but their group role is kept (orphaned) and an audit entry is written, so an accidental removal loses nothing.
 4. If a member leaves the server, they are removed from `group_members` (`on_member_remove`).

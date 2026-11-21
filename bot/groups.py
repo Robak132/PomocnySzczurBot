@@ -18,7 +18,6 @@ from .category_permissions import (
     missing_bot_permissions,
     player_overwrite,
 )
-from .checks import is_admin
 from .constants import (
     CATEGORY_KEY_PREFIX,
     ELEVATED_PERMISSIONS,
@@ -481,8 +480,6 @@ class GroupService:
             raise ServiceError("Bots can't be added to a group.")
         if member.id == gm_id:
             raise ServiceError("A GM can't be a player in their own group.")
-        if is_admin(member, self.admin_role_id):
-            raise ServiceError("Admins can't be added as players.")
         role = self._group_role(guild, gm)
         self._check_manageable(guild, role)
         if await self.db.is_member(gm_id, member.id):
